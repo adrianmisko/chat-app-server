@@ -37,7 +37,7 @@ int main(int argc, char const *argv[]) {
         exit(1);
     }
 
-    res = fcntl(socketfd, F_SETFL, fcntl(socketfd, F_GETFL, 0) | O_NONBLOCK);
+    res = fcntl(sockfd, F_SETFL, fcntl(sockfd, F_GETFL, 0) | O_NONBLOCK);
     if (res == -1) {
         perror("error on setting socket as non-blocking");
         exit(1);
@@ -67,9 +67,44 @@ int main(int argc, char const *argv[]) {
 
     struct epoll_event* events = (struct epoll_event*)calloc(MAX_EVENTS, sizeof(struct epoll_event));
 
+    puts("Starting to listen");
+    while(1) {
 
-    //TODO - add worker thread, look for new connections in a loop (mark new ones as non-blocking) and give them to worker thread
-    //later on - thread pool and queue
+        int numready = epoll_wait(efd, events, MAX_EVENTS, -1);
+        if (numready == -1) {
+            perror("epoll_wait");
+            exit(EXIT_FAILURE);
+        }
+
+        for (int i = 0; i < numready; ++i) {
+            if (events[i].data.fd == sockfd) {
+                int clinetfd = accept(sockfd, 0, 0);
+                if (clinetfd == -1) {
+                    perror("accept");
+                    exit(EXIT_FAILURE);
+                }
+                res = fcntl(clinetfd, F_SETFL, fcntl(clinetfd, F_GETFL, 0) | O_NONBLOCK);
+                if (res == -1) {
+                    perror("error on setting socket as non-blocking");
+                    exit(1);
+                }
+                memset(&event, 0, sizeof(struct epoll_event));
+                event.events = EPOLLIN | EPOLLET;
+                event.data.fd = clinetfd;
+                if (epoll_ctl(efd, EPOLL_CTL_ADD, clinetfd, &event) == -1) {
+                    perror("epoll_ctl: on adding client socked");
+                    exit(EXIT_FAILURE);
+                }
+            } else {
+                //add to queue
+            }
+        }
+
+
+    }
+
+
+
 
     return 0;
 
