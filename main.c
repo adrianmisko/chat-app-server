@@ -10,12 +10,23 @@
 #include <stdlib.h>
 #include <sys/epoll.h>
 #include <errno.h>
+#include <sys/queue.h>
 
 
 #define PORT 1234
 #define MAX_EVENTS 1000
 
 int main(int argc, char const *argv[]) {
+
+    struct node {
+        int fd;
+        char event_type;
+        TAILQ_ENTRY(node) nodes;
+    };
+
+    TAILQ_HEAD(tailqhead, node);
+    struct tailqhead head;
+    TAILQ_INIT(&head);
 
     int sockfd = socket(AF_INET, SOCK_STREAM, 0);
 
@@ -89,14 +100,21 @@ int main(int argc, char const *argv[]) {
                     exit(1);
                 }
                 memset(&event, 0, sizeof(struct epoll_event));
-                event.events = EPOLLIN | EPOLLET;
+                event.events = EPOLLIN | EPOLLOUT;
                 event.data.fd = clinetfd;
                 if (epoll_ctl(efd, EPOLL_CTL_ADD, clinetfd, &event) == -1) {
                     perror("epoll_ctl: on adding client socked");
                     exit(EXIT_FAILURE);
                 }
             } else {
-                //add to queue
+                struct node* elem = (struct node*)calloc(1, sizeof(struct node));
+                elem->fd = events[i].data.fd;
+                if (events[i].events == EPOLLIN)
+                    elem->event_type = 'r';
+                else if (events[i].events == EPOLLET)
+                    elem->event_type = 'w';
+                else
+                    elem->event_type = 'b';
             }
         }
 
