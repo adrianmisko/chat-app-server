@@ -11,17 +11,19 @@
 #include <sys/epoll.h>
 #include <errno.h>
 #include <sys/queue.h>
+#include <pthread.h>
 
 
-#define PORT 1234
+#define PORT 8080
 #define MAX_EVENTS 1000
+#define MAX_THREADS 3
 
 int main(int argc, char const *argv[]) {
 
     struct node {
         int fd;
-        char event_type;
-        TAILQ_ENTRY(node) nodes;
+        char action;
+        TAILQ_ENTRY(node) task_queue;
     };
 
     TAILQ_HEAD(tailqhead, node);
@@ -76,10 +78,18 @@ int main(int argc, char const *argv[]) {
         exit(1);
     }
 
-    struct epoll_event* events = (struct epoll_event*)calloc(MAX_EVENTS, sizeof(struct epoll_event));
+    struct epoll_event events[MAX_EVENTS];
+    pthread_t threadpool[MAX_THREADS];
 
     puts("Starting to listen");
     while(1) {
+
+        struct node* elem;
+        int count = 0;
+        TAILQ_FOREACH(elem, &head, task_queue) {
+            ++count;
+        }
+        printf("queue size: %d\n", count);
 
         int numready = epoll_wait(efd, events, MAX_EVENTS, -1);
         if (numready == -1) {
@@ -87,6 +97,7 @@ int main(int argc, char const *argv[]) {
             exit(EXIT_FAILURE);
         }
 
+        printf("Events ready: %d\n", numready);
         for (int i = 0; i < numready; ++i) {
             if (events[i].data.fd == sockfd) {
                 int clinetfd = accept(sockfd, 0, 0);
@@ -107,14 +118,15 @@ int main(int argc, char const *argv[]) {
                     exit(EXIT_FAILURE);
                 }
             } else {
-                struct node* elem = (struct node*)calloc(1, sizeof(struct node));
-                elem->fd = events[i].data.fd;
+                struct node* new_task = (struct node*)calloc(1, sizeof(struct node));
+                new_task->fd = events[i].data.fd;
                 if (events[i].events == EPOLLIN)
-                    elem->event_type = 'r';
+                    new_task->action = 'r';
                 else if (events[i].events == EPOLLET)
-                    elem->event_type = 'w';
+                    new_task->action = 'w';
                 else
-                    elem->event_type = 'b';
+                    new_task->action = 'b';
+                TAILQ_INSERT_TAIL(&head, new_task, task_queue);
             }
         }
 
