@@ -11,7 +11,6 @@
 #include <sys/epoll.h>
 #include <errno.h>
 #include <sys/queue.h>
-#include <pthread.h>
 
 
 #define PORT 8080
@@ -79,7 +78,6 @@ int main(int argc, char const *argv[]) {
     }
 
     struct epoll_event events[MAX_EVENTS];
-    pthread_t threadpool[MAX_THREADS];
 
     puts("Starting to listen");
     while(1) {
@@ -89,7 +87,7 @@ int main(int argc, char const *argv[]) {
         TAILQ_FOREACH(elem, &head, task_queue) {
             ++count;
         }
-        printf("queue size: %d\n", count);
+       // printf("queue size: %d\n", count);
 
         int numready = epoll_wait(efd, events, MAX_EVENTS, -1);
         if (numready == -1) {
@@ -97,7 +95,7 @@ int main(int argc, char const *argv[]) {
             exit(EXIT_FAILURE);
         }
 
-        printf("Events ready: %d\n", numready);
+        //printf("Events ready: %d\n", numready);
         for (int i = 0; i < numready; ++i) {
             if (events[i].data.fd == sockfd) {
                 int clinetfd = accept(sockfd, 0, 0);
@@ -126,6 +124,7 @@ int main(int argc, char const *argv[]) {
                     new_task->action = 'w';
                 else
                     new_task->action = 'b';
+                printf("fd %d, action %c\n", new_task->fd, new_task->action);
                 TAILQ_INSERT_TAIL(&head, new_task, task_queue);
             }
         }
