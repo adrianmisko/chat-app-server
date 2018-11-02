@@ -10,24 +10,13 @@
 #include <stdlib.h>
 #include <sys/epoll.h>
 #include <errno.h>
-#include <sys/queue.h>
 
 
 #define PORT 8080
 #define MAX_EVENTS 1000
-#define MAX_THREADS 3
+
 
 int main(int argc, char const *argv[]) {
-
-    struct node {
-        int fd;
-        char action;
-        TAILQ_ENTRY(node) task_queue;
-    };
-
-    TAILQ_HEAD(tailqhead, node);
-    struct tailqhead head;
-    TAILQ_INIT(&head);
 
     int sockfd = socket(AF_INET, SOCK_STREAM, 0);
 
@@ -79,60 +68,69 @@ int main(int argc, char const *argv[]) {
 
     struct epoll_event events[MAX_EVENTS];
 
-    puts("Starting to listen");
+    printf("Starting to listen on socket %d\n", sockfd);
     while(1) {
-
-        struct node* elem;
-        int count = 0;
-        TAILQ_FOREACH(elem, &head, task_queue) {
-            ++count;
-        }
-       // printf("queue size: %d\n", count);
 
         int numready = epoll_wait(efd, events, MAX_EVENTS, -1);
         if (numready == -1) {
             perror("epoll_wait");
             exit(EXIT_FAILURE);
         }
-
-        //printf("Events ready: %d\n", numready);
         for (int i = 0; i < numready; ++i) {
+            printf("readyFD: %d\n", events[i].data.fd);
             if (events[i].data.fd == sockfd) {
-                int clinetfd = accept(sockfd, 0, 0);
-                if (clinetfd == -1) {
-                    perror("accept");
-                    exit(EXIT_FAILURE);
-                }
-                res = fcntl(clinetfd, F_SETFL, fcntl(clinetfd, F_GETFL, 0) | O_NONBLOCK);
-                if (res == -1) {
-                    perror("error on setting socket as non-blocking");
-                    exit(1);
-                }
-                memset(&event, 0, sizeof(struct epoll_event));
-                event.events = EPOLLIN | EPOLLOUT;
-                event.data.fd = clinetfd;
-                if (epoll_ctl(efd, EPOLL_CTL_ADD, clinetfd, &event) == -1) {
-                    perror("epoll_ctl: on adding client socked");
-                    exit(EXIT_FAILURE);
+                int clientfd = accept(sockfd, 0, 0);
+                printf("accepting new client, client fd: %d\n", clientfd);
+                if (clientfd == -1) {
+                    if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                        puts("EAGAIN || EWOULDBLOCK");
+                    } else {
+                        perror("accept");
+                        exit(EXIT_FAILURE);
+                    }
+                } else {
+                    res = fcntl(clientfd, F_SETFL, fcntl(clientfd, F_GETFL, 0) | O_NONBLOCK);
+                    if (res == -1) {
+                        perror("error on setting socket as non-blocking");
+                        exit(1);
+                    }
+                    memset(&event, 0, sizeof(struct epoll_event));
+                    event.events = EPOLLIN | EPOLLONESHOT;
+                    event.data.fd = clientfd;
+                    if (epoll_ctl(efd, EPOLL_CTL_ADD, clientfd, &event) == -1) {
+                        perror("epoll_ctl: on adding client socked");
+                        exit(EXIT_FAILURE);
+                    }
                 }
             } else {
-                struct node* new_task = (struct node*)calloc(1, sizeof(struct node));
-                new_task->fd = events[i].data.fd;
-                if (events[i].events == EPOLLIN)
-                    new_task->action = 'r';
-                else if (events[i].events == EPOLLET)
-                    new_task->action = 'w';
-                else
-                    new_task->action = 'b';
-                printf("fd %d, action %c\n", new_task->fd, new_task->action);
-                TAILQ_INSERT_TAIL(&head, new_task, task_queue);
+                int clientfd = events[i].data.fd;
+                printf("socket nr %d\n", clientfd);
+                char buf[4096];
+                memset(buf, 0, sizeof(buf));
+                ssize_t bytes_read = read(clientfd, buf, sizeof(buf));
+                if (bytes_read == -1) {
+                    perror("read error");
+                    exit(1);
+                } else if (bytes_read == 0) {
+                    puts("client has disconnected");
+                    close(clientfd);
+                } else {
+                    printf("%s\n", buf);
+                    char *msg = "HTTP/1.1 200 OK\nContent-Type: text/plain\nContent-Length: 12\n\nHello world!";
+                    size_t bytes_wrote = write(clientfd, msg, strlen(msg));
+                    if (bytes_wrote == -1) {
+                        perror("write error");
+                        exit(1);
+                    }
+                    memset(&event, 0, sizeof(struct epoll_event));
+                    event.events = EPOLLIN | EPOLLONESHOT;
+                    event.data.fd = clientfd;
+                    epoll_ctl(efd, EPOLL_CTL_MOD, clientfd, &event);
+                }
             }
+
         }
-
-
     }
-
-
 
 
     return 0;
