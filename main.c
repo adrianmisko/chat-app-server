@@ -14,9 +14,20 @@
 
 #define PORT 8080
 #define MAX_EVENTS 1000
+#define MAX_CLIENTS 1000
+
+struct conn_state {
+
+    int read_len;
+    char* buf;
+
+};
 
 
 int main(int argc, char const *argv[]) {
+
+    struct conn_state conn_states[MAX_CLIENTS];
+    memset(conn_states, 0, sizeof(conn_states));
 
     int sockfd = socket(AF_INET, SOCK_STREAM, 0);
 
@@ -59,7 +70,7 @@ int main(int argc, char const *argv[]) {
     struct epoll_event event;
     memset(&event, 0, sizeof(struct epoll_event));
     event.data.fd = sockfd;
-    event.events = EPOLLIN;
+    event.events = EPOLLIN | EPOLLET;
     res = epoll_ctl(efd, EPOLL_CTL_ADD, sockfd, &event);
     if (res == -1) {
         perror("on adding sockfd to epoll");
@@ -82,56 +93,72 @@ int main(int argc, char const *argv[]) {
                 int clientfd = accept(sockfd, 0, 0);
                 printf("accepting new client, client fd: %d\n", clientfd);
                 if (clientfd == -1) {
-                    if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                        puts("EAGAIN || EWOULDBLOCK");
+                    if (errno == EWOULDBLOCK || errno == EAGAIN) {
+                        //that can happen for some reason
+                        puts("EWOULDBLOCK || EAGAIN on accept");
                     } else {
                         perror("accept");
-                        exit(EXIT_FAILURE);
+                        exit(1);
                     }
                 } else {
+                    //no error - mark as non blocking and add to epoll set
                     res = fcntl(clientfd, F_SETFL, fcntl(clientfd, F_GETFL, 0) | O_NONBLOCK);
                     if (res == -1) {
                         perror("error on setting socket as non-blocking");
                         exit(1);
                     }
                     memset(&event, 0, sizeof(struct epoll_event));
-                    event.events = EPOLLIN | EPOLLONESHOT;
+                    event.events = EPOLLIN | EPOLLET;
                     event.data.fd = clientfd;
                     if (epoll_ctl(efd, EPOLL_CTL_ADD, clientfd, &event) == -1) {
                         perror("epoll_ctl: on adding client socked");
-                        exit(EXIT_FAILURE);
+                        exit(1);
                     }
                 }
             } else {
                 int clientfd = events[i].data.fd;
                 printf("socket nr %d\n", clientfd);
-                char buf[4096];
-                memset(buf, 0, sizeof(buf));
-                ssize_t bytes_read = read(clientfd, buf, sizeof(buf));
-                if (bytes_read == -1) {
-                    perror("read error");
-                    exit(1);
-                } else if (bytes_read == 0) {
-                    puts("client has disconnected");
-                    close(clientfd);
-                } else {
-                    printf("%s\n", buf);
-                    char *msg = "HTTP/1.1 200 OK\nContent-Type: text/plain\nContent-Length: 12\n\nHello world!";
-                    size_t bytes_wrote = write(clientfd, msg, strlen(msg));
-                    if (bytes_wrote == -1) {
-                        perror("write error");
-                        exit(1);
+                char buf[1024];
+                char finished = 0;
+                while (1) {
+                    ssize_t bytes_read = read(clientfd, buf, sizeof(buf));
+
+                    if (bytes_read == -1) {
+
+                        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                                break;
+                        } else {
+                            perror("error on reading from client");
+                            exit(1);
+                        }
+
+                    } else if (bytes_read == 0) {
+                        puts("client has disconnected");
+                        close(clientfd);
+                    } else {
+                        if (finished) continue; //ignore whats after header this time in case we got header and then data arrived instead of getting eagain and break
+                        if (conn_states[clientfd].read_len != 0) {
+                            //reading is resumed
+                            //has it found header this time?
+                            //if yes dealloc memory, finished = 1 (has to do more loops to get to the EAGAIN)
+                            //if no check if read_len > 4kb (header too large)
+                            //if no then go on
+                        } else {
+                           //standard read
+                           //look for rnrn - found? ok stop
+                           //else malloc, add to conn_states
+                        }
                     }
-                    memset(&event, 0, sizeof(struct epoll_event));
-                    event.events = EPOLLIN | EPOLLONESHOT;
-                    event.data.fd = clientfd;
-                    epoll_ctl(efd, EPOLL_CTL_MOD, clientfd, &event);
+
+
                 }
+
+
+
             }
 
         }
     }
-
 
     return 0;
 
