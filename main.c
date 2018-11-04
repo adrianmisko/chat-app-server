@@ -6,37 +6,95 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <sys/types.h>
+#include <sys/stat.h>
 #include <netdb.h>
 #include <stdlib.h>
 #include <sys/epoll.h>
 #include <errno.h>
+#include <sys/mman.h>
 
 
 #define PORT 8080
 #define MAX_EVENTS 1000
 #define MAX_CLIENTS 1000
 
+
+char* html;
+
 struct conn_state {
-    int read_len;
+    int bytes_read;
+    int bytes_wrote;
     char* buf;
+    char* msg;
 };
 
-
-//TODO - read_len -> bytes read
-//TODO - resilet write (func)
 //TODO - parse headers
 
-void read_from_socket(int clientfd, struct conn_state* conn_state) {
-    char buf[1024];
+void write_to_socket(int clientfd, char* msg, struct conn_state* conn_state, int efd, char continued) {
+    size_t msglen = strlen(msg);
+    while (1) {
+        ssize_t remaining_bytes = msglen - conn_state->bytes_wrote;
+        ssize_t to_be_written = remaining_bytes < 4096 ? remaining_bytes : 4096;
+        printf("To be written: %d\n", to_be_written);
+        ssize_t bytes_wrote = write(clientfd, msg+conn_state->bytes_wrote, (size_t)to_be_written);
+        if (bytes_wrote == -1) {
+            if (errno == EWOULDBLOCK || errno == EAGAIN) {
+                //we didnt fit it all - need to check again later
+                struct epoll_event event;
+                memset(&event, 0, sizeof(event));
+                event.events = EPOLLIN | EPOLLOUT | EPOLLET;
+                event.data.fd = clientfd;
+                epoll_ctl(efd, EPOLL_CTL_MOD, clientfd, &event);
+                //save state
+                conn_state->msg = msg;
+            } else if (errno == EPIPE) {
+                puts("client has terminated connection");
+                close(clientfd);
+                break;
+            } else {
+                printf("errno %d\n", errno);
+                perror("error on writing to client");
+                exit(1);
+            }
+        } else if (bytes_wrote == 0) {
+            puts("client has disconnected");
+            close(clientfd);
+            break;
+        } else {
+            conn_state->bytes_wrote += bytes_wrote;
+            if (conn_state->bytes_wrote == msglen) {
+                //were done
+                conn_state->bytes_wrote = 0;
+                if (continued) {
+                    struct epoll_event event;
+                    memset(&event, 0, sizeof(event));
+                    event.events = EPOLLIN | EPOLLET;
+                    event.data.fd = clientfd;
+                    epoll_ctl(efd, EPOLL_CTL_MOD, clientfd, &event);
+                }
+                break;
+            }
+        }
+    }
+}
+
+
+
+void read_from_socket(int clientfd, struct conn_state* conn_state, int efd) {
+    char buf[512];
     memset(buf, 0, sizeof(buf));
     char finished = 0;
     while (1) {
         ssize_t bytes_read = read(clientfd, buf, sizeof(buf));
-
+        printf("bytes read: %d\n", (int)bytes_read);
         if (bytes_read == -1) {
 
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {  //no more data
                 break;
+            } else if (errno == EPIPE) {
+                puts("client has terminated connection");
+                close(clientfd);
+                return;
             } else {
                 perror("error on reading from client");
                 exit(1);
@@ -45,15 +103,16 @@ void read_from_socket(int clientfd, struct conn_state* conn_state) {
         } else if (bytes_read == 0) {
             puts("client has disconnected");
             close(clientfd);
-            break;
+            return;
         } else {
             if (finished) continue; //ignore whats after header this time in case we got header and
-            if (conn_state->read_len != 0) {                  //then data arrived instead of getting eagain and break
+            if (conn_state->bytes_read != 0) {                  //then data arrived instead of getting eagain and break
                 //reading is resumed
                 //concatenate buffers
                 puts("mempcy");
-                memcpy(conn_state->buf+conn_state->read_len, buf,
-                       sizeof(buf)+conn_state->read_len);
+                memcpy(conn_state->buf+conn_state->bytes_read, buf,
+                       sizeof(buf)+conn_state->bytes_read);
+                printf("%s\n", conn_state->buf);
                 //has it found header this time?
                 if (strstr(buf, "\r\n\r\n") != NULL) {
                     //if yes dealloc memory, finished = 1 (has to do more loops to get to the EAGAIN)
@@ -61,14 +120,14 @@ void read_from_socket(int clientfd, struct conn_state* conn_state) {
                     printf("%s\n", conn_state->buf);
                     memset(conn_state->buf, 0, 4096);
                     free (conn_state->buf);
-                    conn_state->read_len = 0;
+                    conn_state->bytes_read = 0;
                     finished = 1;
                     //parse header
                 } else {
                     //if no check if read_len > 4kb (header too large)
                     //if no then go on
-                    conn_state->read_len += (int)bytes_read;
-                    if (conn_state->read_len >= 4096) {
+                    conn_state->bytes_read += (int)bytes_read;
+                    if (conn_state->bytes_read >= 4096) {
                         //header too big
                     }
                 }
@@ -77,6 +136,7 @@ void read_from_socket(int clientfd, struct conn_state* conn_state) {
                 //look for rnrn - found? ok stop - were only interesed in headers
                 if (strstr(buf, "\r\n\r\n") != NULL) {
                     //parse header
+                    write(clientfd, "a\n", 3);
                     puts("found rn right away");
                     printf("%s\n", buf);
                 } else {
@@ -84,16 +144,39 @@ void read_from_socket(int clientfd, struct conn_state* conn_state) {
                     puts("mallocing");
                     conn_state->buf = (char*)malloc(4096 * sizeof(char));
                     memcpy(conn_state->buf, buf, (size_t)bytes_read);
-                    conn_state->read_len = (int)bytes_read;
+                    conn_state->bytes_read = (int)bytes_read;
                 }
+
             }
         }
     }
+    puts("about to call write");
+    write_to_socket(clientfd, html, conn_state, efd, 0);
+
 }
 
 
 
 int main(int argc, char const *argv[]) {
+
+    struct stat st;
+    stat("../index.html", &st);
+    size_t fsize = st.st_size;
+    printf("size %d\n", fsize);
+    int file = open("../index.html", O_RDONLY);
+    if (file == -1) {
+        perror("index html");
+        exit(1);
+    }
+
+    //add header
+    html = calloc(fsize+1, sizeof(char));
+    int err = read(file, html, fsize);
+    if (err == -1) {
+        perror("error on reading file to buf");
+        exit(1);
+    }
+
 
     struct conn_state conn_states[MAX_CLIENTS];
     memset(conn_states, 0, sizeof(conn_states));
@@ -157,7 +240,11 @@ int main(int argc, char const *argv[]) {
             exit(EXIT_FAILURE);
         }
         for (int i = 0; i < numready; ++i) {
-            printf("readyFD: %d\n", events[i].data.fd);
+            printf("readyFD: %d ", events[i].data.fd);
+            if (events[i].events & EPOLLOUT)
+                puts("wants to read");
+            else
+                puts("wants to write");
             if (events[i].data.fd == sockfd) {
                 int clientfd = accept(sockfd, 0, 0);
                 printf("accepting new client, client fd: %d\n", clientfd);
@@ -185,8 +272,8 @@ int main(int argc, char const *argv[]) {
                     }
                 }
             } else {
-                printf("socket nr %d\n", events[i].data.fd);
-                read_from_socket(events[i].data.fd, &conn_states[events[i-5].data.fd]); //4 decriptors are always taken + 1 for index 0
+                //printf("socket nr %d\n", events[i].data.fd);
+                read_from_socket(events[i].data.fd, &conn_states[events[i-4].data.fd], efd);
             }
 
         }
