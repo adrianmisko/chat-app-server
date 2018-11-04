@@ -34,7 +34,7 @@ void write_to_socket(int clientfd, char* msg, struct conn_state* conn_state, int
     size_t msglen = strlen(msg);
     while (1) {
         ssize_t remaining_bytes = msglen - conn_state->bytes_wrote;
-        ssize_t to_be_written = remaining_bytes < 4096 ? remaining_bytes : 4096;
+        ssize_t to_be_written = remaining_bytes < 1024 ? remaining_bytes : 1024;
         printf("To be written: %d\n", to_be_written);
         ssize_t bytes_wrote = write(clientfd, msg+conn_state->bytes_wrote, (size_t)to_be_written);
         if (bytes_wrote == -1) {
@@ -272,8 +272,12 @@ int main(int argc, char const *argv[]) {
                     }
                 }
             } else {
-                //printf("socket nr %d\n", events[i].data.fd);
-                read_from_socket(events[i].data.fd, &conn_states[events[i-4].data.fd], efd);
+                if (events[i].events & EPOLLOUT) {
+                    write_to_socket(events[i].data.fd, conn_states[events[i].data.fd - 4].msg, &conn_states[events[i].data.fd - 4], efd, 1);
+                } else {
+                    //printf("socket nr %d\n", events[i].data.fd);
+                    read_from_socket(events[i].data.fd, &conn_states[events[i].data.fd - 4], efd);
+                }
             }
 
         }
