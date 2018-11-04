@@ -10,7 +10,6 @@
 #include <stdlib.h>
 #include <sys/epoll.h>
 #include <errno.h>
-#include <10/server/lib/simplehash.h>
 
 
 #define PORT 8080
