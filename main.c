@@ -18,11 +18,80 @@
 #define MAX_CLIENTS 1000
 
 struct conn_state {
-
     int read_len;
     char* buf;
-
 };
+
+
+//TODO - read_len -> bytes read
+//TODO - resilet write (func)
+//TODO - parse headers
+
+void read_from_socket(int clientfd, struct conn_state* conn_state) {
+    char buf[1024];
+    memset(buf, 0, sizeof(buf));
+    char finished = 0;
+    while (1) {
+        ssize_t bytes_read = read(clientfd, buf, sizeof(buf));
+
+        if (bytes_read == -1) {
+
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                break;
+            } else {
+                perror("error on reading from client");
+                exit(1);
+            }
+
+        } else if (bytes_read == 0) {
+            puts("client has disconnected");
+            close(clientfd);
+            break;
+        } else {
+            if (finished) continue; //ignore whats after header this time in case we got header and
+            if (conn_state->read_len != 0) {                  //then data arrived instead of getting eagain and break
+                //reading is resumed
+                //concatenate buffers
+                puts("mempcy");
+                memcpy(conn_state->buf+conn_state->read_len, buf,
+                       sizeof(buf)+conn_state->read_len);
+                //has it found header this time?
+                if (strstr(buf, "\r\n\r\n") != NULL) {
+                    //if yes dealloc memory, finished = 1 (has to do more loops to get to the EAGAIN)
+                    puts("found rn");
+                    printf("%s\n", conn_state->buf);
+                    memset(conn_state->buf, 0, 4096);
+                    free (conn_state->buf);
+                    conn_state->read_len = 0;
+                    finished = 1;
+                    //parse header
+                } else {
+                    //if no check if read_len > 4kb (header too large)
+                    //if no then go on
+                    conn_state->read_len += (int)bytes_read;
+                    if (conn_state->read_len >= 4096) {
+                        //header too big
+                    }
+                }
+            } else {
+                //standard read
+                //look for rnrn - found? ok stop - were only interesed in headers
+                if (strstr(buf, "\r\n\r\n") != NULL) {
+                    //parse header
+                    puts("found rn right away");
+                    printf("%s\n", buf);
+                } else {
+                    //else save state - malloc, add to conn_states
+                    puts("mallocing");
+                    conn_state->buf = (char*)malloc(4096 * sizeof(char));
+                    memcpy(conn_state->buf, buf, (size_t)bytes_read);
+                    conn_state->read_len = (int)bytes_read;
+                }
+            }
+        }
+    }
+}
+
 
 
 int main(int argc, char const *argv[]) {
@@ -117,75 +186,8 @@ int main(int argc, char const *argv[]) {
                     }
                 }
             } else {
-                int clientfd = events[i].data.fd;
-                printf("socket nr %d\n", clientfd);
-                char buf[1024];
-                memset(buf, 0, sizeof(buf));
-                char finished = 0;
-                while (1) {
-                    ssize_t bytes_read = read(clientfd, buf, sizeof(buf));
-
-                    if (bytes_read == -1) {
-
-                        if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                                break;
-                        } else {
-                            perror("error on reading from client");
-                            exit(1);
-                        }
-
-                    } else if (bytes_read == 0) {
-                        puts("client has disconnected");
-                        close(clientfd);
-                        break;
-                    } else {
-                        if (finished) continue; //ignore whats after header this time in case we got header and
-                        if (conn_states[clientfd].read_len != 0) {                  //then data arrived instead of getting eagain and break
-                            //reading is resumed
-                            //concatenate buffers
-                            puts("mempcy");
-                            memcpy(conn_states[clientfd].buf+conn_states[clientfd].read_len, buf,
-                                    sizeof(buf)+conn_states[clientfd].read_len);
-                            //has it found header this time?
-                            if (strstr(buf, "\r\n\r\n") != NULL) {
-                                //if yes dealloc memory, finished = 1 (has to do more loops to get to the EAGAIN)
-                                puts("found rn");
-                                printf("%s\n", conn_states[clientfd].buf);
-                                memset(conn_states[clientfd].buf, 0, 4096);
-                                free (conn_states[clientfd].buf);
-                                conn_states[clientfd].read_len = 0;
-                                finished = 1;
-                                //parse header
-                            } else {
-                                //if no check if read_len > 4kb (header too large)
-                                //if no then go on
-                                conn_states[clientfd].read_len += (int)bytes_read;
-                                if (conn_states[clientfd].read_len >= 4096) {
-                                    //header too big
-                                }
-                            }
-                        } else {
-                           //standard read
-                           //look for rnrn - found? ok stop - were only interesed in headers
-                           if (strstr(buf, "\r\n\r\n") != NULL) {
-                               //parse header
-                               puts("found rn right away");
-                               printf("%s\n", buf);
-                           } else {
-                               //else save state - malloc, add to conn_states
-                               puts("mallocing");
-                               conn_states[clientfd].buf = (char*)malloc(4096 * sizeof(char));
-                               memcpy(conn_states[clientfd].buf, buf, (size_t)bytes_read);
-                               conn_states[clientfd].read_len = (int)bytes_read;
-                           }
-                        }
-                    }
-
-
-                }
-
-
-
+                printf("socket nr %d\n", events[i].data.fd);
+                read_from_socket(events[i].data.fd, &conn_states[events[i-5].data.fd]); //4 decriptors are always taken + 1 for index 0
             }
 
         }
