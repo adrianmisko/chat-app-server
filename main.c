@@ -19,16 +19,23 @@
 #define MAX_CLIENTS 1000
 
 
+char* css;
+char* js;
 char* html;
+char* html_header;
+char* css_header;
+char* js_header;
+char* header_too_big = "HTTP/1.1 431 Request Header Fields Too Large\r\n\r\n";
+char* content_not_found = "HTTP/1.1 404 Not Found\r\n\r\n";
+char* http_ok_response_header;
 
 struct conn_state {
+    int protocol;
     int bytes_read;
     int bytes_wrote;
     char* buf;
-    char* msg;
+    char* msg; //tailq
 };
-
-//TODO - parse headers
 
 void write_to_socket(int clientfd, char* msg, struct conn_state* conn_state, int efd, char continued) {
     size_t msglen = strlen(msg);
@@ -78,7 +85,33 @@ void write_to_socket(int clientfd, char* msg, struct conn_state* conn_state, int
     }
 }
 
-
+void parse_header_and_send_response(char* msg, int clientfd, struct conn_state* conn_state, int efd) {
+    char* first_line = strtok(msg, "\r\n");
+    char* rest =   strtok(msg, "");
+    char* method = strtok(first_line, " ");
+    char* resource = strtok(NULL, " ");
+    printf("method: %s\nresource: %s\n", method, resource);
+    if (strcmp(method, "GET") == 0) {
+        if (strcmp(resource, "/") == 0) {
+            puts("slij index");
+        } else if (strcmp(resource, "/app.js") == 0) {
+            puts("slij jsa");
+        } else if (strcmp(resource, "/styles.css") == 0) {
+            puts("slij cssa");
+        } else if (strcmp(resource, "/chat") == 0) {
+            char* host = strtok(rest, "\r\n");
+            char* upgrade = strtok(NULL, "\r\n");
+            char* connection = strtok(NULL, "\r\n");
+            char* sec_websocket_key = strtok(NULL, "\r\n");
+            char* sec_websocket_version = strtok(NULL, "\r\n");
+            char* rest_of_handshake = strtok(NULL, "");
+        } else {
+            puts("slij 404");
+        }
+    } else {
+        puts("aaa");
+    }
+}
 
 void read_from_socket(int clientfd, struct conn_state* conn_state, int efd) {
     char buf[512];
@@ -112,23 +145,26 @@ void read_from_socket(int clientfd, struct conn_state* conn_state, int efd) {
                 puts("mempcy");
                 memcpy(conn_state->buf+conn_state->bytes_read, buf,
                        sizeof(buf)+conn_state->bytes_read);
-                printf("%s\n", conn_state->buf);
+                //printf("%s\n", conn_state->buf);
                 //has it found header this time?
                 if (strstr(buf, "\r\n\r\n") != NULL) {
                     //if yes dealloc memory, finished = 1 (has to do more loops to get to the EAGAIN)
                     puts("found rn");
                     printf("%s\n", conn_state->buf);
+                    parse_header_and_send_response(conn_state->buf, clientfd, conn_state, efd);
                     memset(conn_state->buf, 0, 4096);
                     free (conn_state->buf);
                     conn_state->bytes_read = 0;
                     finished = 1;
-                    //parse header
+
                 } else {
                     //if no check if read_len > 4kb (header too large)
                     //if no then go on
                     conn_state->bytes_read += (int)bytes_read;
                     if (conn_state->bytes_read >= 4096) {
-                        //header too big
+                        write_to_socket(clientfd, header_too_big, conn_state, efd, 0);
+                        conn_state->bytes_read = 0;
+                        free (conn_state->buf);
                     }
                 }
             } else {
@@ -138,7 +174,8 @@ void read_from_socket(int clientfd, struct conn_state* conn_state, int efd) {
                     //parse header
                     write(clientfd, "a\n", 3);
                     puts("found rn right away");
-                    printf("%s\n", buf);
+                    parse_header_and_send_response(buf, clientfd, conn_state, efd);
+                    //printf("%s\n", buf);
                 } else {
                     //else save state - malloc, add to conn_states
                     puts("mallocing");
@@ -150,9 +187,6 @@ void read_from_socket(int clientfd, struct conn_state* conn_state, int efd) {
             }
         }
     }
-    puts("about to call write");
-    write_to_socket(clientfd, html, conn_state, efd, 0);
-
 }
 
 
@@ -176,7 +210,6 @@ int main(int argc, char const *argv[]) {
         perror("error on reading file to buf");
         exit(1);
     }
-
 
     struct conn_state conn_states[MAX_CLIENTS];
     memset(conn_states, 0, sizeof(conn_states));
