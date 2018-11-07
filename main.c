@@ -11,23 +11,16 @@
 #include <stdlib.h>
 #include <sys/epoll.h>
 #include <errno.h>
-#include <sys/mman.h>
-
 
 #define PORT 8080
 #define MAX_EVENTS 1000
 #define MAX_CLIENTS 1000
 
+//TODO clear connstate on client disconnection and finished writing
 
-char* css;
-char* js;
-char* html;
-char* html_header;
-char* css_header;
-char* js_header;
-char* header_too_big = "HTTP/1.1 431 Request Header Fields Too Large\r\n\r\n";
-char* content_not_found = "HTTP/1.1 404 Not Found\r\n\r\n";
-char* http_ok_response_header;
+const char* header_too_big = "HTTP/1.1 431 Request Header Fields Too Large\r\n\r\n";
+const char* content_not_found = "HTTP/1.1 404 Not Found\r\n\r\n";
+char* html_response;
 
 struct conn_state {
     int protocol;
@@ -41,7 +34,7 @@ void write_to_socket(int clientfd, char* msg, struct conn_state* conn_state, int
     size_t msglen = strlen(msg);
     while (1) {
         ssize_t remaining_bytes = msglen - conn_state->bytes_wrote;
-        ssize_t to_be_written = remaining_bytes < 1024 ? remaining_bytes : 1024;
+        ssize_t to_be_written = remaining_bytes < 4096 ? remaining_bytes : 4096;
         printf("To be written: %d\n", to_be_written);
         ssize_t bytes_wrote = write(clientfd, msg+conn_state->bytes_wrote, (size_t)to_be_written);
         if (bytes_wrote == -1) {
@@ -151,7 +144,7 @@ void read_from_socket(int clientfd, struct conn_state* conn_state, int efd) {
                     //if yes dealloc memory, finished = 1 (has to do more loops to get to the EAGAIN)
                     puts("found rn");
                     printf("%s\n", conn_state->buf);
-                    parse_header_and_send_response(conn_state->buf, clientfd, conn_state, efd);
+                    //parse_header_and_send_response(conn_state->buf, clientfd, conn_state, efd);
                     memset(conn_state->buf, 0, 4096);
                     free (conn_state->buf);
                     conn_state->bytes_read = 0;
@@ -174,8 +167,8 @@ void read_from_socket(int clientfd, struct conn_state* conn_state, int efd) {
                     //parse header
                     write(clientfd, "a\n", 3);
                     puts("found rn right away");
-                    parse_header_and_send_response(buf, clientfd, conn_state, efd);
-                    //printf("%s\n", buf);
+                    //parse_header_and_send_response(buf, clientfd, conn_state, efd);
+                    write_to_socket(clientfd, html_response, conn_state, efd, 0);
                 } else {
                     //else save state - malloc, add to conn_states
                     puts("mallocing");
@@ -193,19 +186,23 @@ void read_from_socket(int clientfd, struct conn_state* conn_state, int efd) {
 
 int main(int argc, char const *argv[]) {
 
+    char* response_header = "HTTP/1.1 200 OK\r\nContent-Type: %s; charset=utf-8\r\nContent-Length: %d\r\n\r\n";
+
     struct stat st;
     stat("../index.html", &st);
-    size_t fsize = st.st_size;
-    printf("size %d\n", fsize);
+    __off_t fsize = st.st_size;
     int file = open("../index.html", O_RDONLY);
     if (file == -1) {
         perror("index html");
         exit(1);
     }
 
-    //add header
-    html = calloc(fsize+1, sizeof(char));
-    int err = read(file, html, fsize);
+
+    html_response = calloc(strlen(response_header) + fsize + 100, sizeof(char));
+
+    sprintf(html_response, response_header, "text/html", fsize);
+
+    ssize_t err = read(file, html_response+strlen(html_response), (size_t)fsize);
     if (err == -1) {
         perror("error on reading file to buf");
         exit(1);
