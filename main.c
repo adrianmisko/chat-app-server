@@ -16,27 +16,125 @@
 #define MAX_EVENTS 1000
 #define MAX_CLIENTS 1000
 
-//TODO clear connstate on client disconnection and finished writing
-
 const char* header_too_big = "HTTP/1.1 431 Request Header Fields Too Large\r\n\r\n";
 const char* content_not_found = "HTTP/1.1 404 Not Found\r\n\r\n";
 char* html_response;
 
-struct conn_state {
-    int protocol;
-    int bytes_read;
-    int bytes_wrote;
+struct write_state {
+    struct write_state* next;
     char* buf;
-    char* msg; //tailq
 };
 
-void write_to_socket(int clientfd, char* msg, struct conn_state* conn_state, int efd, char continued) {
+struct write_queue {
+    struct write_state* head;
+    struct write_state* tail;
+    size_t size;
+};
+
+
+struct conn_state {
+    char protocol;          //0 - HTTP, 1 - WebSocket (...#define)
+    size_t bytes_read;
+    char* buf;
+    size_t bytes_wrote;
+    struct write_queue write_queue;
+};
+
+
+struct write_state* front(struct write_queue* write_queue) {
+    return write_queue->head;
+}
+
+void append(struct write_queue* write_queue, struct write_state* write_state) {
+    if (write_queue->size == 0) {
+        write_queue->head = write_state;
+        write_queue->tail = write_state;
+    } else {
+        write_queue->tail->next = write_state;
+        write_queue->tail = write_state;
+    }
+    write_queue->size++;
+}
+
+void remove_front(struct write_queue* write_queue) {
+    if (write_queue->size == 0)
+        return;
+    if (write_queue->size == 1) {
+        free (write_queue->head);
+        memset(write_queue, 0, sizeof(struct write_queue));
+        return;
+    } else {
+        struct write_state* temp = write_queue->head->next;
+        free(write_queue->head);
+        write_queue->head = temp;
+        write_queue->size--;
+    }
+}
+
+void release_and_reset(struct conn_state* conn_state) {
+    if (conn_state->write_queue.size == 0) {
+        memset(conn_state, 0, sizeof(struct conn_state));
+        return;
+    }
+    struct write_state* write_state = conn_state->write_queue.head;
+    while (write_state != NULL) {
+        free(write_state->buf);
+        write_state = write_state->next;
+    }
+    memset(conn_state, 0, sizeof(struct conn_state));
+}
+
+void resume_write(int clientfd, struct conn_state* conn_state, int efd) {
+    char* msg = conn_state->write_queue.head->buf;
     size_t msglen = strlen(msg);
+    size_t remaining_bytes = msglen;
     while (1) {
-        ssize_t remaining_bytes = msglen - conn_state->bytes_wrote;
-        ssize_t to_be_written = remaining_bytes < 4096 ? remaining_bytes : 4096;
-        printf("To be written: %d\n", to_be_written);
-        ssize_t bytes_wrote = write(clientfd, msg+conn_state->bytes_wrote, (size_t)to_be_written);
+        size_t to_write = remaining_bytes < 4096 ? remaining_bytes : 4096;
+        ssize_t bytes_wrote = write(clientfd, msg, to_write);
+        if (bytes_wrote == -1) {
+            if (errno == EWOULDBLOCK || errno == EAGAIN) {
+                //we didn't fit it all - need to check again later
+                //epoll is still polling for write, no need to rearm the descriptor
+                //move remaining memory to the beggining of the buffer
+                memcpy(msg, msg+msglen-remaining_bytes, remaining_bytes);
+                memset(msg, 0, remaining_bytes);
+            } else if (errno == EPIPE) {
+                puts("client has terminated connection");
+                release_and_reset(conn_state);
+                close(clientfd);
+                break;
+            } else {
+                remaining_bytes -= bytes_wrote;
+                if (remaining_bytes == 0) {
+                    //were done -> remove head from queue and start writing next message. Stop polling for write event and return if there are no enqueued operations
+                    remove_front(&conn_state->write_queue);
+                    if (conn_state->write_queue.size == 0) {
+                        struct epoll_event event;
+                        memset(&event, 0, sizeof(event));
+                        event.data.fd = clientfd;
+                        event.events = EPOLLIN | EPOLLET;
+                        epoll_ctl(efd, EPOLL_CTL_MOD, clientfd, &event);
+                        break;
+                    } else {
+                        //update variables so that next write starts to write next message
+                        msg = conn_state->write_queue.head->buf;
+                        msglen = strlen(msg);
+                        remaining_bytes = msglen;
+                    }
+                }
+                //otherwise continue writing untill we get EAGAIN or finish the write
+            }
+        }
+    }
+}
+
+void write_to_socket(int clientfd, char* msg, struct conn_state* conn_state, int efd) {
+    size_t msglen = strlen(msg);
+    size_t remaining_bytes = msglen;
+    while (1) {
+        size_t to_be_written = remaining_bytes < 4096 ? remaining_bytes : 4096;
+        printf("to be written %d\n", (int)to_be_written);
+        ssize_t bytes_wrote = write(clientfd, msg+conn_state->bytes_wrote, to_be_written);
         if (bytes_wrote == -1) {
             if (errno == EWOULDBLOCK || errno == EAGAIN) {
                 //we didnt fit it all - need to check again later
@@ -45,33 +143,27 @@ void write_to_socket(int clientfd, char* msg, struct conn_state* conn_state, int
                 event.events = EPOLLIN | EPOLLOUT | EPOLLET;
                 event.data.fd = clientfd;
                 epoll_ctl(efd, EPOLL_CTL_MOD, clientfd, &event);
-                //save state
-                conn_state->msg = msg;
+                //also save the state
+                struct write_state* write_state = (struct write_state*)calloc(1, sizeof(struct write_state));
+                conn_state->write_queue.tail->buf = (char*)malloc(remaining_bytes * sizeof(char));
+                conn_state->bytes_wrote = msglen - remaining_bytes;
+                append(&conn_state->write_queue, write_state);
             } else if (errno == EPIPE) {
                 puts("client has terminated connection");
+                release_and_reset(conn_state);
                 close(clientfd);
                 break;
             } else {
                 printf("errno %d\n", errno);
                 perror("error on writing to client");
-                exit(1);
             }
-        } else if (bytes_wrote == 0) {
-            puts("client has disconnected");
-            close(clientfd);
-            break;
         } else {
             conn_state->bytes_wrote += bytes_wrote;
-            if (conn_state->bytes_wrote == msglen) {
-                //were done
+            remaining_bytes -= bytes_wrote;
+            printf("remaining bytes %d\n", remaining_bytes);
+            if (remaining_bytes == 0) {
+                //were done -> we only want to reset write pointer
                 conn_state->bytes_wrote = 0;
-                if (continued) {
-                    struct epoll_event event;
-                    memset(&event, 0, sizeof(event));
-                    event.events = EPOLLIN | EPOLLET;
-                    event.data.fd = clientfd;
-                    epoll_ctl(efd, EPOLL_CTL_MOD, clientfd, &event);
-                }
                 break;
             }
         }
@@ -79,10 +171,10 @@ void write_to_socket(int clientfd, char* msg, struct conn_state* conn_state, int
 }
 
 void parse_header_and_send_response(char* msg, int clientfd, struct conn_state* conn_state, int efd) {
-    char* first_line = strtok(msg, "\r\n");
-    char* rest =   strtok(msg, "");
-    char* method = strtok(first_line, " ");
-    char* resource = strtok(NULL, " ");
+    char *first_line = strtok(msg, "\r\n");
+    char *rest = strtok(msg, "");
+    char *method = strtok(first_line, " ");
+    char *resource = strtok(NULL, " ");
     printf("method: %s\nresource: %s\n", method, resource);
     if (strcmp(method, "GET") == 0) {
         if (strcmp(resource, "/") == 0) {
@@ -92,6 +184,7 @@ void parse_header_and_send_response(char* msg, int clientfd, struct conn_state* 
         } else if (strcmp(resource, "/styles.css") == 0) {
             puts("slij cssa");
         } else if (strcmp(resource, "/chat") == 0) {
+            puts("protocol upgrade");
             char* host = strtok(rest, "\r\n");
             char* upgrade = strtok(NULL, "\r\n");
             char* connection = strtok(NULL, "\r\n");
@@ -119,6 +212,7 @@ void read_from_socket(int clientfd, struct conn_state* conn_state, int efd) {
                 break;
             } else if (errno == EPIPE) {
                 puts("client has terminated connection");
+                release_and_reset(conn_state);
                 close(clientfd);
                 return;
             } else {
@@ -128,6 +222,7 @@ void read_from_socket(int clientfd, struct conn_state* conn_state, int efd) {
 
         } else if (bytes_read == 0) {
             puts("client has disconnected");
+            release_and_reset(conn_state);
             close(clientfd);
             return;
         } else {
@@ -145,17 +240,16 @@ void read_from_socket(int clientfd, struct conn_state* conn_state, int efd) {
                     puts("found rn");
                     printf("%s\n", conn_state->buf);
                     //parse_header_and_send_response(conn_state->buf, clientfd, conn_state, efd);
+                    write_to_socket(clientfd, html_response, conn_state, efd);
                     memset(conn_state->buf, 0, 4096);
                     free (conn_state->buf);
                     conn_state->bytes_read = 0;
-                    finished = 1;
-
                 } else {
                     //if no check if read_len > 4kb (header too large)
                     //if no then go on
                     conn_state->bytes_read += (int)bytes_read;
                     if (conn_state->bytes_read >= 4096) {
-                        write_to_socket(clientfd, header_too_big, conn_state, efd, 0);
+                        write_to_socket(clientfd, header_too_big, conn_state, efd);
                         conn_state->bytes_read = 0;
                         free (conn_state->buf);
                     }
@@ -168,13 +262,13 @@ void read_from_socket(int clientfd, struct conn_state* conn_state, int efd) {
                     write(clientfd, "a\n", 3);
                     puts("found rn right away");
                     //parse_header_and_send_response(buf, clientfd, conn_state, efd);
-                    write_to_socket(clientfd, html_response, conn_state, efd, 0);
+                    write_to_socket(clientfd, html_response, conn_state, efd);
                 } else {
                     //else save state - malloc, add to conn_states
                     puts("mallocing");
                     conn_state->buf = (char*)malloc(4096 * sizeof(char));
                     memcpy(conn_state->buf, buf, (size_t)bytes_read);
-                    conn_state->bytes_read = (int)bytes_read;
+                    conn_state->bytes_read = bytes_read;
                 }
 
             }
@@ -303,10 +397,10 @@ int main(int argc, char const *argv[]) {
                 }
             } else {
                 if (events[i].events & EPOLLOUT) {
-                    write_to_socket(events[i].data.fd, conn_states[events[i].data.fd - 4].msg, &conn_states[events[i].data.fd - 4], efd, 1);
+                    resume_write(events[i].data.fd, &conn_states[events[i].data.fd], efd);
                 } else {
-                    //printf("socket nr %d\n", events[i].data.fd);
-                    read_from_socket(events[i].data.fd, &conn_states[events[i].data.fd - 4], efd);
+                    printf("conn[%d]\n", events[i].data.fd);
+                    read_from_socket(events[i].data.fd, &conn_states[events[i].data.fd], efd);
                 }
             }
 
