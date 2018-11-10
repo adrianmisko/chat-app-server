@@ -97,7 +97,7 @@ void resume_write(int clientfd, struct conn_state* conn_state, int efd) {
                 //epoll is still polling for write, no need to rearm the descriptor
                 //move remaining memory to the beggining of the buffer
                 memcpy(msg, msg+msglen-remaining_bytes, remaining_bytes);
-                memset(msg, 0, remaining_bytes);
+                memset(msg+remaining_bytes, 0, msglen-remaining_bytes);
             } else if (errno == EPIPE) {
                 puts("client has terminated connection");
                 release_and_reset(conn_state);
