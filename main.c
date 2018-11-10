@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <sys/epoll.h>
 #include <errno.h>
+#include <openssl/sha.h>
 
 #define PORT 8080
 #define MAX_EVENTS 1000
@@ -85,6 +86,10 @@ void release_and_reset(struct conn_state* conn_state) {
     memset(conn_state, 0, sizeof(struct conn_state));
 }
 
+void accept_protocol_upgrade(int clientfd, struct conn_state* conn_state, char* key) {
+    ;
+}
+
 void resume_write(int clientfd, struct conn_state* conn_state, int efd) {
     char* msg = conn_state->write_queue.head->buf;
     size_t msglen = strlen(msg);
@@ -135,7 +140,6 @@ void write_to_socket(int clientfd, char* msg, struct conn_state* conn_state, int
     size_t bytes_sent = 0;
     while (1) {
         size_t to_write = remaining_bytes < 4096 ? remaining_bytes : 4096;
-        printf("to be written %d\n", (int)to_write);
         ssize_t bytes_wrote = write(clientfd, msg+bytes_sent, to_write);
         if (bytes_wrote == -1) {
             if (errno == EWOULDBLOCK || errno == EAGAIN) {
@@ -156,13 +160,12 @@ void write_to_socket(int clientfd, char* msg, struct conn_state* conn_state, int
                 close(clientfd);
                 break;
             } else {
-                printf("errno %d\n", errno);
                 perror("error on writing to client");
+                exit(1);
             }
         } else {
             bytes_sent += bytes_wrote;
             remaining_bytes -= bytes_wrote;
-            printf("remaining bytes %d\n", (int)remaining_bytes);
             if (remaining_bytes == 0) {
                 //were done
                 break;
@@ -173,15 +176,13 @@ void write_to_socket(int clientfd, char* msg, struct conn_state* conn_state, int
 }
 
 
-//as for now, we have only handful of files to send
-//so instead of using sendfile() they are already stored in memory
-//and request is dispatched in else-if spaghetti
-void parse_header(char* msg, int clientfd, struct conn_state* conn_state, int efd) {
+//as for now, we have only handful of files to send so instead of using sendfile() they are already stored in memory and request is dispatched in else-if spaghetti
+void parse_header(int clientfd, char* msg, struct conn_state* conn_state) {
     char *first_line = strtok(msg, "\r\n");
-    char *rest = strtok(msg, "");
+    char *rest = msg + strlen(first_line) + 2;
     char *method = strtok(first_line, " ");
     char *resource = strtok(NULL, " ");
-    printf("method: %s\nresource: %s\n", method, resource);
+    //printf("method: %s, resource: %s\n", method, resource);
     if (strcmp(method, "GET") == 0) {
         if (strcmp(resource, "/") == 0) {
             puts("send html file");
@@ -190,13 +191,27 @@ void parse_header(char* msg, int clientfd, struct conn_state* conn_state, int ef
         } else if (strcmp(resource, "/styles.css") == 0) {
             puts("send css file\"");
         } else if (strcmp(resource, "/chat") == 0) {    //protocol upgrade
-            puts("protocol upgrade");
-            char* host = strtok(rest, "\r\n");
-            char* upgrade = strtok(NULL, "\r\n");
-            char* connection = strtok(NULL, "\r\n");
-            char* sec_websocket_key = strtok(NULL, "\r\n");
-            char* sec_websocket_version = strtok(NULL, "\r\n");
-            char* rest_of_handshake = strtok(NULL, "");
+           puts("protocol upgrade");
+           char* line = strtok(rest, "\r\n");
+           size_t len = strlen(line);
+           line = strtok(line, ":");
+           line = line + len + 2;
+           while (line != NULL) {
+               line = strtok(line, "\r\n");
+               len = strlen(line);
+               line = strtok(line, ":");
+               if (strcmp(line, "Sec-WebSocket-Key") == 0)
+                   break;
+               else
+                   line = line + len + 2;
+           }
+           if (line == NULL) {
+               puts("bad request");
+               return;
+           }
+            line[strlen(line)] = ':';
+            char* key = strtok(line, ": ") + strlen(line) + 2;
+            accept_protocol_upgrade(clientfd, conn_state, key);
         } else {
             puts("send 404");
         }
@@ -234,7 +249,6 @@ void resume_read(int clientfd, struct conn_state* conn_state, int efd) {
             //has it found header this time?
             size_t offset = conn_state->bytes_read - bytes_read;
             if (strstr(conn_state->buf + offset, "\r\n\r\n") != NULL) {      //buff + offset -> no need to look for delimiter in whole buffer
-                puts("found header this time");
                 //parse header and decide what to do next (answer or wait for whole message)
                 write_to_socket(clientfd, html_response, conn_state, efd);
             }
@@ -248,7 +262,6 @@ void read_from_socket(int clientfd, struct conn_state* conn_state, int efd) {
     memset(buf, 0, sizeof(buf));
     while (1) {
         ssize_t bytes_read = read(clientfd, buf, sizeof(buf));
-        printf("bytes read: %d\n", (int)bytes_read);
         if (bytes_read == -1) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) {  //no more data
                 break;
@@ -269,12 +282,11 @@ void read_from_socket(int clientfd, struct conn_state* conn_state, int efd) {
         } else {
             //look for header delimiter
             if (strstr(buf, "\r\n\r\n") != NULL) {
-                puts("found rn right away");
                 //parse header and decide what to do next (answer or wait for whole message)
+                parse_header(clientfd, buf, conn_state);
                 write_to_socket(clientfd, html_response, conn_state, efd);
             } else {
                 //else save state - malloc, add to conn_states
-                puts("malloc-ing");
                 conn_state->buf = (char*)malloc(4096 * sizeof(char));
                 memcpy(conn_state->buf, buf, (size_t)bytes_read);
                 conn_state->bytes_read = (size_t)bytes_read;
@@ -373,14 +385,8 @@ int main(int argc, char const *argv[]) {
             exit(EXIT_FAILURE);
         }
         for (int i = 0; i < numready; ++i) {
-            printf("readyFD: %d ", events[i].data.fd);
-            if (events[i].events & EPOLLOUT)
-                puts("wants to read");
-            else
-                puts("wants to write");
             if (events[i].data.fd == sockfd) {
                 int clientfd = accept(sockfd, 0, 0);
-                printf("accepting new client, client fd: %d\n", clientfd);
                 if (clientfd == -1) {
                     if (errno == EWOULDBLOCK || errno == EAGAIN) {
                         //that can happen for some reason
