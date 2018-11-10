@@ -217,6 +217,11 @@ void resume_read(int clientfd, struct conn_state* conn_state, int efd) {
                 perror("error on reading from client");
                 exit(1);
             }
+        } else if (bytes_read == 0) {
+            puts("client has disconnected");
+            release_and_reset(conn_state);
+            close(clientfd);
+            break;
         } else if (bytes_read == remaining_space) {
             //buffer is full
             break;
@@ -256,7 +261,7 @@ void read_from_socket(int clientfd, struct conn_state* conn_state, int efd) {
             puts("client has disconnected");
             release_and_reset(conn_state);
             close(clientfd);
-            return;
+            break;
         } else {
             //look for header delimiter
             if (strstr(buf, "\r\n\r\n") != NULL) {
