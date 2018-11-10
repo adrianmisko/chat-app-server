@@ -146,7 +146,8 @@ void write_to_socket(int clientfd, char* msg, struct conn_state* conn_state, int
                 //also save the state
                 struct write_state* write_state = (struct write_state*)calloc(1, sizeof(struct write_state));
                 conn_state->write_queue.tail->buf = (char*)malloc(remaining_bytes * sizeof(char));
-                conn_state->bytes_wrote = msglen - remaining_bytes;
+                size_t bytes_written = msglen - remaining_bytes;
+                memcpy(conn_state->write_queue.tail->buf, msg+bytes_written, remaining_bytes);
                 append(&conn_state->write_queue, write_state);
             } else if (errno == EPIPE) {
                 puts("client has terminated connection");
@@ -160,7 +161,7 @@ void write_to_socket(int clientfd, char* msg, struct conn_state* conn_state, int
         } else {
             conn_state->bytes_wrote += bytes_wrote;
             remaining_bytes -= bytes_wrote;
-            printf("remaining bytes %d\n", remaining_bytes);
+            printf("remaining bytes %d\n", (int)remaining_bytes);
             if (remaining_bytes == 0) {
                 //were done -> we only want to reset write pointer
                 conn_state->bytes_wrote = 0;
