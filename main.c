@@ -172,9 +172,13 @@ void write_to_socket(int clientfd, char* msg, struct conn_state* conn_state, int
     }
 }
 
-void parse_header(char* msg, int clientfd, struct conn_state* conn_state, int efd) {  //as for now, we have only handful of files to send
-    char *first_line = strtok(msg, "\r\n");                                           //so instead of using sendfile() they are already stored in memory
-    char *rest = strtok(msg, "");                                                     //and request is dispatched in else-if spaghetti
+
+//as for now, we have only handful of files to send
+//so instead of using sendfile() they are already stored in memory
+//and request is dispatched in else-if spaghetti
+void parse_header(char* msg, int clientfd, struct conn_state* conn_state, int efd) {
+    char *first_line = strtok(msg, "\r\n");
+    char *rest = strtok(msg, "");
     char *method = strtok(first_line, " ");
     char *resource = strtok(NULL, " ");
     printf("method: %s\nresource: %s\n", method, resource);
@@ -182,9 +186,9 @@ void parse_header(char* msg, int clientfd, struct conn_state* conn_state, int ef
         if (strcmp(resource, "/") == 0) {
             puts("send html file");
         } else if (strcmp(resource, "/app.js") == 0) {
-            puts("end js file\"");
+            puts("send js file\"");
         } else if (strcmp(resource, "/styles.css") == 0) {
-            puts("end style file\"");
+            puts("send css file\"");
         } else if (strcmp(resource, "/chat") == 0) {    //protocol upgrade
             puts("protocol upgrade");
             char* host = strtok(rest, "\r\n");
