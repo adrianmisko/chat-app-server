@@ -12,6 +12,8 @@
 #include <sys/epoll.h>
 #include <errno.h>
 #include <openssl/sha.h>
+#include <openssl/bio.h>
+#include <openssl/evp.h>
 
 #define PORT 8080
 #define MAX_EVENTS 1000
@@ -86,9 +88,6 @@ void release_and_reset(struct conn_state* conn_state) {
     memset(conn_state, 0, sizeof(struct conn_state));
 }
 
-void accept_protocol_upgrade(int clientfd, struct conn_state* conn_state, char* key) {
-    ;
-}
 
 void resume_write(int clientfd, struct conn_state* conn_state, int efd) {
     char* msg = conn_state->write_queue.head->buf;
@@ -175,9 +174,27 @@ void write_to_socket(int clientfd, char* msg, struct conn_state* conn_state, int
     }
 }
 
+void accept_protocol_upgrade(int clientfd, struct conn_state* conn_state, char* key, int efd) {
+    printf("upgrading protocol for client %d\n", clientfd);
+    const char* magic_string = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+    unsigned char* buf = (unsigned char*)malloc( (strlen(magic_string) + strlen(key)) * sizeof(char));
+    memcpy(buf, key, strlen(key));
+    memcpy(buf+strlen(key), magic_string, strlen(magic_string));
+    unsigned char sha1_result[20];
+    memset(sha1_result, 0, sizeof(sha1_result));
+    SHA1(buf, strlen(buf), sha1_result);
+    char encodedData[120];
+    memset(encodedData, 0, sizeof(encodedData));
+    EVP_EncodeBlock((unsigned char *)encodedData, sha1_result, sizeof(sha1_result));
+    const char* response_template = "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: %s\r\n\r\n";
+    char response[256];
+    sprintf(response, response_template, encodedData);
+    write_to_socket(clientfd, response, conn_state, efd);
+    free(buf);
+}
 
 //as for now, we have only handful of files to send so instead of using sendfile() they are already stored in memory and request is dispatched in else-if spaghetti
-void parse_header(int clientfd, char* msg, struct conn_state* conn_state) {
+void parse_header(int clientfd, char* msg, struct conn_state* conn_state, int efd) {
     char *first_line = strtok(msg, "\r\n");
     char *rest = msg + strlen(first_line) + 2;
     char *method = strtok(first_line, " ");
@@ -185,7 +202,7 @@ void parse_header(int clientfd, char* msg, struct conn_state* conn_state) {
     //printf("method: %s, resource: %s\n", method, resource);
     if (strcmp(method, "GET") == 0) {
         if (strcmp(resource, "/") == 0) {
-            puts("send html file");
+            write_to_socket(clientfd, html_response, conn_state, efd);
         } else if (strcmp(resource, "/app.js") == 0) {
             puts("send js file\"");
         } else if (strcmp(resource, "/styles.css") == 0) {
@@ -211,7 +228,7 @@ void parse_header(int clientfd, char* msg, struct conn_state* conn_state) {
            }
             line[strlen(line)] = ':';
             char* key = strtok(line, ": ") + strlen(line) + 2;
-            accept_protocol_upgrade(clientfd, conn_state, key);
+            accept_protocol_upgrade(clientfd, conn_state, key, efd);
         } else {
             puts("send 404");
         }
@@ -237,7 +254,7 @@ void resume_read(int clientfd, struct conn_state* conn_state, int efd) {
                 exit(1);
             }
         } else if (bytes_read == 0) {
-            puts("client has disconnected");
+            printf("client %d has disconnected\n", clientfd);
             release_and_reset(conn_state);
             close(clientfd);
             break;
@@ -275,7 +292,7 @@ void read_from_socket(int clientfd, struct conn_state* conn_state, int efd) {
                 exit(1);
             }
         } else if (bytes_read == 0) {
-            puts("client has disconnected");
+            printf("client %d has disconnected\n", clientfd);
             release_and_reset(conn_state);
             close(clientfd);
             break;
@@ -283,8 +300,8 @@ void read_from_socket(int clientfd, struct conn_state* conn_state, int efd) {
             //look for header delimiter
             if (strstr(buf, "\r\n\r\n") != NULL) {
                 //parse header and decide what to do next (answer or wait for whole message)
-                parse_header(clientfd, buf, conn_state);
-                write_to_socket(clientfd, html_response, conn_state, efd);
+                parse_header(clientfd, buf, conn_state, efd);
+
             } else {
                 //else save state - malloc, add to conn_states
                 conn_state->buf = (char*)malloc(4096 * sizeof(char));
