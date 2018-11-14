@@ -16,9 +16,6 @@
 #include <openssl/evp.h>
 #include <inttypes.h>
 
-//TODO !!! change write (wriete + offset)
-//TODO !!! HAVE BOTH BUFFER AND MESSAGE IN CONN_STATE
-
 
 #define PORT 8080
 #define MAX_EVENTS 1000
