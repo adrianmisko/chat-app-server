@@ -378,6 +378,7 @@ void read_ws_message(int clientfd, struct conn_state* conn_state, int efd) {
                 }
             }
             while (conn_state->bytes_read >= conn_state->buf_len) {
+                printf("%s\n", conn_state->buf);
                 //we had more than one message or more in the buffer
                 //size_t decodecmsglen;
                 //char* decoded_msg = decode(conn_state, decodecmsglen);      conn_state->buf + conn_state->skip
@@ -398,6 +399,16 @@ void read_ws_message(int clientfd, struct conn_state* conn_state, int efd) {
                 conn_state->bytes_read -= conn_state->buf_len;
                 if (conn_state->bytes_read == 0) {
                     finished = 1;
+                } else if (conn_state->bytes_read > 0)  {
+                    size_t old_buf_len = conn_state->buf_len;
+                    parse_data_frame(conn_state);
+                    if (conn_state->buf_len > old_buf_len) {
+                        //allocate more space
+                        char* new_buffer = (char*)calloc(conn_state->buf_len, sizeof(char));
+                        memcpy(new_buffer, conn_state->buf, conn_state->bytes_read);
+                        free(conn_state->buf);
+                        conn_state->buf = new_buffer;
+                    }
                 }
             }
         }
