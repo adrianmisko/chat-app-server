@@ -59,10 +59,6 @@ struct conn_state {         //used to store state of connection if we got partia
 };
 
 
-struct write_state* front(struct write_queue* write_queue) {
-    return write_queue->head;
-}
-
 void append(struct write_queue* write_queue, struct write_state* write_state) {
     if (write_queue->size == 0) {
         write_queue->head = write_state;
