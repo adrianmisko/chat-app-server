@@ -16,6 +16,7 @@
 #include <openssl/evp.h>
 #include <inttypes.h>
 
+//TODO - check cleaning up after writes, reads and disconnects
 
 #define PORT 8080
 #define MAX_EVENTS 1000
@@ -51,6 +52,7 @@ struct conn_state {         //used to store state of connection if we got partia
     char* buf;
     size_t msg_len;
     char* msg;
+    char data_frame_received;
     char opcode;
     char fin;
     char skip;
@@ -100,6 +102,8 @@ void release_and_reset(struct conn_state* conn_state) {
 
 
 void parse_data_frame(struct conn_state* conn_state) {
+    if (conn_state->bytes_read < 6)
+        return;
     char* buf = conn_state->buf;
     size_t msg_len = (unsigned int)(*(buf+1) & 127);
     conn_state->fin = (buf[0] & 128) ? (char)1 : (char)0;
@@ -108,18 +112,21 @@ void parse_data_frame(struct conn_state* conn_state) {
         conn_state->skip = 6;
         conn_state->buf_len = msg_len + conn_state->skip;
         memcpy(conn_state->mask, buf+2, sizeof(conn_state->mask));
-    } else if (msg_len == 126) {
+        conn_state->data_frame_received = 1;
+    } else if (msg_len == 126 && conn_state->bytes_read >= 8) {
         uint16_t u16;
         memcpy(&u16, buf+2, sizeof(uint16_t));
         conn_state->skip = 8;
         conn_state->buf_len = ntohs(u16) + conn_state->skip;
         memcpy(conn_state->mask, buf+4, sizeof(conn_state->mask));
-    } else {
+        conn_state->data_frame_received = 1;
+    } else if (msg_len == 127 && conn_state->bytes_read >= 14) {
         uint64_t u64;
         memcpy(&u64, buf + 2, sizeof(uint64_t));
         conn_state->skip = 14;
         conn_state->buf_len = (size_t) be64toh(u64) + conn_state->skip;
         memcpy(conn_state->mask, buf+10, sizeof(conn_state->mask));
+        conn_state->data_frame_received = 1;
     }
 }
 
@@ -333,6 +340,16 @@ void read_http_request(int clientfd, struct conn_state* conn_state, int efd) {
 }
 
 
+char* decode_ws_message(struct conn_state* conn_state, size_t* decoded_msg_len) {
+    char* payload = conn_state->buf + conn_state->skip;
+    *decoded_msg_len = conn_state->buf_len - conn_state->skip;
+    char* msg = (char*)calloc(*decoded_msg_len, sizeof(char));
+    for (int i = 0; i < *decoded_msg_len; ++i)
+        msg[i]= payload[i] ^ conn_state->mask[i % 4];
+    return msg;
+}
+
+
 void read_ws_message(int clientfd, struct conn_state* conn_state, int efd) {
     char finished = 0;
     if (conn_state->bytes_read == 0) {              //if read is not resumed allocate some space
@@ -358,8 +375,8 @@ void read_ws_message(int clientfd, struct conn_state* conn_state, int efd) {
             break;
         } else {
             finished = 0;                                   //we expected EAGAIN but new data arrived
-            conn_state->bytes_read += bytes_read;            //TODO - continue; if we didnt get at lest 14 bytes and dataframe isnt parsed yet - were assuming that mesages are at least 15 bytes big (6 for frame and 9 for content)
-            if (conn_state->bytes_read - bytes_read == 0) {  //that needs to be done only once
+            conn_state->bytes_read += bytes_read;
+            if (! conn_state->data_frame_received) {        //that needs to be done only once
                 size_t old_buf_len = conn_state->buf_len;
                 parse_data_frame(conn_state);
                 if (conn_state->buf_len > old_buf_len) {
@@ -371,28 +388,36 @@ void read_ws_message(int clientfd, struct conn_state* conn_state, int efd) {
                 }
             }
             while (conn_state->bytes_read >= conn_state->buf_len) {
-                printf("%s\n", conn_state->buf);
                 //we had more than one message or more in the buffer
-                //size_t decodecmsglen;
-                //char* decoded_msg = decode(conn_state, decodecmsglen);      conn_state->buf + conn_state->skip
-                //check fin if 1 -> process message (conn_state->buf + conb_state->skip)
-                //else if opcode = new msg (0x1/0x2)
-                // conn_state->msg = calloc(conn_state->buf_len - conn->skip, sizeof(char));  or decodecmsglen & decoded_msg
-                // memcpy(conn_state->msg, conn_state->buf + conn_state->skip, conn_state->buflen - con->skip); or decodecmsglen & decoded_msg
-                //connstate-> msg_len = conn->buflen - conn->skip or decodecmsglen & decoded_msg
-                //else if opcode = 0x0 = continue
-                //old_len = msg_len
-                //new = malloc (old + new)
-                //memcpy(new, con->msg, con->msg_len)
-                //memcpy(new, con->buf + con->skip, con->buflen - con->skip)   or decodecmsglen & decoded_msg
-                //con->msglen = old + new
+                size_t decoded_msg_len;
+                char* decoded_msg = decode_ws_message(conn_state, &decoded_msg_len);
+                if (conn_state->fin) {
+                    if (conn_state->opcode == 0x9) {
+                        //it's a ping
+                        ;
+                    } else {
+                        //process message
+                        printf("%s\n", decoded_msg);
+
+                    }
+                    free(decoded_msg);
+                } else if (conn_state->opcode == 0x1 || conn_state->opcode == 0x2) {        //new message that will be continued, were saving it
+                    conn_state->msg = decoded_msg;
+                    conn_state->msg_len = decoded_msg_len;
+                } else if (conn_state->opcode == 0x0) {                                     //continuation of a message
+                    char* new_buffer = (char*)calloc(decoded_msg_len + conn_state->msg_len, sizeof(char));
+                    memcpy(new_buffer, conn_state->msg, conn_state->msg_len);
+                    memcpy(new_buffer + conn_state->msg_len, decoded_msg, decoded_msg_len);
+                    conn_state->msg_len += decoded_msg_len;
+                }
                 memcpy(conn_state->buf, conn_state->buf + conn_state->buf_len,
                         conn_state->bytes_read - conn_state->buf_len);
                 memset(conn_state->buf + conn_state->bytes_read - conn_state->buf_len, 0, conn_state->buf_len);
                 conn_state->bytes_read -= conn_state->buf_len;
+                conn_state->data_frame_received = 0;
                 if (conn_state->bytes_read == 0) {
                     finished = 1;
-                } else if (conn_state->bytes_read > 0)  {
+                } else if (conn_state->bytes_read > 0)  {   //if there was another message, or at least its frame we need to extract the information here
                     size_t old_buf_len = conn_state->buf_len;
                     parse_data_frame(conn_state);
                     if (conn_state->buf_len > old_buf_len) {
