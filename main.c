@@ -15,6 +15,7 @@
 #include <openssl/bio.h>
 #include <openssl/evp.h>
 #include <inttypes.h>
+#include <math.h>
 
 //TODO - check cleaning up after writes, reads and disconnects
 
@@ -132,7 +133,8 @@ void parse_data_frame(struct conn_state* conn_state) {
 
 
 void resume_write(int clientfd, struct conn_state* conn_state, int efd) {
-    char* msg = conn_state->write_queue.head->buf;
+    //data is already packed into frames if we were writing to websocket
+    char *msg = conn_state->write_queue.head->buf;
     size_t remaining_bytes = conn_state->write_queue.head->msg_len - conn_state->write_queue.head->bytes_wrote;
     while (1) {
         size_t offset = conn_state->write_queue.head->bytes_wrote;
@@ -153,7 +155,8 @@ void resume_write(int clientfd, struct conn_state* conn_state, int efd) {
                 conn_state->write_queue.head->bytes_wrote += bytes_wrote;
                 if (remaining_bytes == 0) {
                     //were done -> remove head from queue and start writing next message. Stop polling for write event
-                    remove_front(&conn_state->write_queue);                            //and return if there are no enqueued operations
+                    remove_front(
+                            &conn_state->write_queue);                            //and return if there are no enqueued operations
                     if (conn_state->write_queue.size == 0) {
                         struct epoll_event event;
                         memset(&event, 0, sizeof(event));
@@ -164,7 +167,8 @@ void resume_write(int clientfd, struct conn_state* conn_state, int efd) {
                     } else {
                         //update variables so that next write starts to write next message
                         msg = conn_state->write_queue.head->buf;
-                        remaining_bytes = conn_state->write_queue.head->msg_len - conn_state->write_queue.head->bytes_wrote;
+                        remaining_bytes =
+                                conn_state->write_queue.head->msg_len - conn_state->write_queue.head->bytes_wrote;
                     }
                 }
                 //otherwise continue writing until we get EAGAIN or finish the write
@@ -172,7 +176,6 @@ void resume_write(int clientfd, struct conn_state* conn_state, int efd) {
         }
     }
 }
-
 
 void write_to_socket(int clientfd, char* msg, size_t msg_len, struct conn_state* conn_state, int efd) {
     size_t remaining_bytes = msg_len;
@@ -189,8 +192,8 @@ void write_to_socket(int clientfd, char* msg, size_t msg_len, struct conn_state*
                 event.data.fd = clientfd;
                 epoll_ctl(efd, EPOLL_CTL_MOD, clientfd, &event);
                 //also save the state
-                struct write_state* write_state = (struct write_state*)calloc(1, sizeof(struct write_state));
-                write_state->buf = (char*)malloc(remaining_bytes * sizeof(char));
+                struct write_state* write_state = calloc(1, sizeof(struct write_state));
+                write_state->buf = malloc(remaining_bytes * sizeof(char));
                 memcpy(write_state->buf, msg + bytes_sent, remaining_bytes);
                 write_state->msg_len = remaining_bytes;
                 write_state->bytes_wrote = 0;
@@ -219,7 +222,7 @@ void write_to_socket(int clientfd, char* msg, size_t msg_len, struct conn_state*
 void accept_protocol_upgrade(int clientfd, struct conn_state* conn_state, char* key, int efd) {
     printf("upgrading protocol for client %d\n", clientfd);
     const char* magic_string = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
-    unsigned char* buf = (unsigned char*)malloc( (strlen(magic_string) + strlen(key)) * sizeof(char));
+    unsigned char* buf = malloc( (strlen(magic_string) + strlen(key)) * sizeof(char));
     memcpy(buf, key, strlen(key));
     memcpy(buf+strlen(key), magic_string, strlen(magic_string));
     unsigned char sha1_result[20];
@@ -323,7 +326,7 @@ void read_http_request(int clientfd, struct conn_state* conn_state, int efd) {
                 p = p + strlen(delim);
                 size_t header_len = p - conn_state->buf;
                 bytes_after_header = conn_state->bytes_read - header_len;
-                char *buf = (char*)malloc(header_len * sizeof(char));
+                char *buf = malloc(header_len * sizeof(char));
                 memcpy(buf, conn_state->buf, header_len);
                 parse_header(clientfd, buf, conn_state, efd);
                 free(buf);
@@ -343,12 +346,27 @@ void read_http_request(int clientfd, struct conn_state* conn_state, int efd) {
 char* decode_ws_message(struct conn_state* conn_state, size_t* decoded_msg_len) {
     char* payload = conn_state->buf + conn_state->skip;
     *decoded_msg_len = conn_state->buf_len - conn_state->skip;
-    char* msg = (char*)calloc(*decoded_msg_len, sizeof(char));
+    char* msg = calloc(*decoded_msg_len, sizeof(char));
     for (int i = 0; i < *decoded_msg_len; ++i)
         msg[i]= payload[i] ^ conn_state->mask[i % 4];
     return msg;
 }
 
+void enframe(size_t msg_len, char* frame, size_t* frame_len) {
+    frame[0] = 0b10000001;
+    if (msg_len <= 125) {
+        frame[1] = msg_len & 127;
+        *frame_len = 2;
+    } else if (msg_len <= 65365) {
+        frame[1] = 126;
+        frame[2] = msg_len >> 4;        //probably not right
+        frame[3] = msg_len << 4;
+        *frame_len = 4;
+    } else {
+        //8 next bytes
+        ;
+    }
+}
 
 void read_ws_message(int clientfd, struct conn_state* conn_state, int efd) {
     char finished = 0;
@@ -381,7 +399,7 @@ void read_ws_message(int clientfd, struct conn_state* conn_state, int efd) {
                 parse_data_frame(conn_state);
                 if (conn_state->buf_len > old_buf_len) {
                     //allocate more space
-                    char* new_buffer = (char*)calloc(conn_state->buf_len, sizeof(char));
+                    char* new_buffer = calloc(conn_state->buf_len, sizeof(char));
                     memcpy(new_buffer, conn_state->buf, conn_state->bytes_read);
                     free(conn_state->buf);
                     conn_state->buf = new_buffer;
@@ -398,14 +416,19 @@ void read_ws_message(int clientfd, struct conn_state* conn_state, int efd) {
                     } else {
                         //process message
                         printf("%s\n", decoded_msg);
-
+                        char* hi = "hi";
+                        size_t frame_len;
+                        char frame[10];
+                        enframe(2, frame, &frame_len);
+                        write_to_socket(clientfd, frame, frame_len, conn_state, efd);
+                        write_to_socket(clientfd, hi, strlen(hi), conn_state, efd);
                     }
                     free(decoded_msg);
                 } else if (conn_state->opcode == 0x1 || conn_state->opcode == 0x2) {        //new message that will be continued, were saving it
                     conn_state->msg = decoded_msg;
                     conn_state->msg_len = decoded_msg_len;
                 } else if (conn_state->opcode == 0x0) {                                     //continuation of a message
-                    char* new_buffer = (char*)calloc(decoded_msg_len + conn_state->msg_len, sizeof(char));
+                    char* new_buffer = calloc(decoded_msg_len + conn_state->msg_len, sizeof(char));
                     memcpy(new_buffer, conn_state->msg, conn_state->msg_len);
                     memcpy(new_buffer + conn_state->msg_len, decoded_msg, decoded_msg_len);
                     conn_state->msg_len += decoded_msg_len;
@@ -422,7 +445,7 @@ void read_ws_message(int clientfd, struct conn_state* conn_state, int efd) {
                     parse_data_frame(conn_state);
                     if (conn_state->buf_len > old_buf_len) {
                         //allocate more space
-                        char* new_buffer = (char*)calloc(conn_state->buf_len, sizeof(char));
+                        char* new_buffer = calloc(conn_state->buf_len, sizeof(char));
                         memcpy(new_buffer, conn_state->buf, conn_state->bytes_read);
                         free(conn_state->buf);
                         conn_state->buf = new_buffer;
