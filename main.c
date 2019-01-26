@@ -17,6 +17,8 @@
 #include <inttypes.h>
 #include <math.h>
 
+#include "hashmap.h"
+
 //TODO - check cleaning up after writes, reads and disconnects
 
 #define PORT 8080
@@ -25,6 +27,7 @@
 #define HTTP_PROTOCOL 0
 #define WEBSOCKET_PROTOCOL 1
 
+map_t connections;
 const char* header_too_big = "HTTP/1.1 431 Request Header Fields Too Large\r\n\r\n";
 const char* content_not_found = "HTTP/1.1 404 Not Found\r\n\r\n";
 const char* method_not_supported = "HTTP/1.1 405 Method Not Allowed\r\n\r\n";
@@ -241,7 +244,7 @@ void accept_protocol_upgrade(int clientfd, struct conn_state* conn_state, char* 
     free(buf);
 }
 
-//as for now, we have only handful of files to send so instead of using sendfile() they are already stored in memory and request is dispatched in else-if spaghetti
+// we have only handful of files to send so instead of using sendfile() they are already stored in memory and request is dispatched in else-if spaghetti
 void parse_header(int clientfd, char* msg, struct conn_state* conn_state, int efd) {
    // printf("%s\n", msg);
     char *first_line = strtok(msg, "\r\n");
@@ -374,6 +377,31 @@ void enframe(size_t msg_len, char* frame, size_t* frame_len) {
     }
 }
 
+
+void dispatch_clients_request(char* msg, struct conn_state* conn_state, int efd) {
+    char *first_line = strtok(msg, "\n");
+    char *payload = msg + strlen(first_line) + 3;
+    char* action = strtok(first_line, " ");
+    char* target =  msg + strlen(action) + 1;
+    printf("Action: %s\n", action);
+    printf("Target: %s\n", target);
+    printf("Payload: %s\n", payload);
+    int clientfd;
+    int code = hashmap_get(connections, target, &clientfd);
+    printf("Code: %d\n", code);
+    printf("Client file desc: %d\n", clientfd);
+    printf("Map length: %d\n", hashmap_length(connections));
+
+   // size_t frame_len;
+   // char frame[10];
+   // enframe(2, frame, &frame_len);
+    //int clientfd = hashmap_get(connections, target, 0);
+   // printf("uwagaaaaaa: %d\n", clientfd);
+    //write_to_socket(clientfd, frame, frame_len, conn_state, efd);
+   // write_to_socket(clientfd, hi, strlen(hi), conn_state, efd);
+}
+
+
 void read_ws_message(int clientfd, struct conn_state* conn_state, int efd) {
     char finished = 0;
     if (conn_state->bytes_read == 0) {              //if read is not resumed allocate some space
@@ -421,13 +449,7 @@ void read_ws_message(int clientfd, struct conn_state* conn_state, int efd) {
                         ;
                     } else {
                         //process message
-                        printf("%s\n", decoded_msg);
-                        char* hi = "hi";
-                        size_t frame_len;
-                        char frame[10];
-                        enframe(2, frame, &frame_len);
-                        write_to_socket(clientfd, frame, frame_len, conn_state, efd);
-                        write_to_socket(clientfd, hi, strlen(hi), conn_state, efd);
+                       dispatch_clients_request(decoded_msg, conn_state, efd);
                     }
                     free(decoded_msg);
                 } else if (conn_state->opcode == 0x1 || conn_state->opcode == 0x2) {        //new message that will be continued, were saving it
@@ -527,6 +549,8 @@ int main(int argc, char const *argv[]) {
     struct conn_state conn_states[MAX_CLIENTS];
     memset(conn_states, 0, sizeof(conn_states));
 
+    connections = hashmap_new();
+
     int sockfd = socket(AF_INET, SOCK_STREAM, 0);
 
     int reuse = 1;
@@ -577,7 +601,11 @@ int main(int argc, char const *argv[]) {
 
     struct epoll_event events[MAX_EVENTS];
 
-   // printf("Starting to listen on socket %d\n", sockfd);
+    struct sockaddr_in client_info;
+    size_t client_info_size = sizeof(struct sockaddr_in);
+    memset(&client_info, 0, client_info_size);
+
+    printf("Starting to listen on socket %d\n", sockfd);
     while(1) {
 
         int numready = epoll_wait(efd, events, MAX_EVENTS, -1);
@@ -587,7 +615,7 @@ int main(int argc, char const *argv[]) {
         }
         for (int i = 0; i < numready; ++i) {
             if (events[i].data.fd == sockfd) {
-                int clientfd = accept(sockfd, 0, 0);
+                int clientfd = accept(sockfd, (struct sockaddr*)&client_info, (socklen_t*)&client_info_size);
                 if (clientfd == -1) {
                     if (errno == EWOULDBLOCK || errno == EAGAIN) {
                         //that can happen for some reason
@@ -597,6 +625,7 @@ int main(int argc, char const *argv[]) {
                         exit(1);
                     }
                 } else {
+                    printf("Accepted %d\n", clientfd);
                     //no error - mark as non blocking and add to epoll set
                     res = fcntl(clientfd, F_SETFL, fcntl(clientfd, F_GETFL, 0) | O_NONBLOCK);
                     if (res == -1) {
@@ -609,6 +638,20 @@ int main(int argc, char const *argv[]) {
                     if (epoll_ctl(efd, EPOLL_CTL_ADD, clientfd, &event) == -1) {
                         perror("epoll_ctl: on adding client socked");
                         exit(1);
+                    }
+                    // get client's info and add to hashmap
+                    char client_name[INET6_ADDRSTRLEN];
+                    char port_name[6];
+                    if (getnameinfo((const struct sockaddr*)&client_info, sizeof client_info,
+                                    client_name, sizeof(client_name), NULL, 0, NI_NUMERICHOST | NI_NUMERICSERV) == 0) {
+                        char* key = calloc(1, strlen(client_name));
+                        memcpy(key, client_name, strlen(client_name));
+                        printf("%s\n", key);
+                        int code = hashmap_put(connections, key, clientfd);
+                        printf("Code: %d\n", code);
+                    } else {
+                        printf("Unable to get address\n");
+                        close(clientfd);
                     }
                 }
             } else {
@@ -629,6 +672,7 @@ int main(int argc, char const *argv[]) {
         }
     }
 
+    hashmap_free(connections);
     return 0;
 
 }
