@@ -29,7 +29,8 @@ const char* header_too_big = "HTTP/1.1 431 Request Header Fields Too Large\r\n\r
 const char* content_not_found = "HTTP/1.1 404 Not Found\r\n\r\n";
 const char* method_not_supported = "HTTP/1.1 405 Method Not Allowed\r\n\r\n";
 char* html_response;
-
+char* css_response;
+char* js_response;
 
 struct write_state {
     struct write_state* next;
@@ -182,6 +183,7 @@ void write_to_socket(int clientfd, char* msg, size_t msg_len, struct conn_state*
     size_t bytes_sent = 0;
     while (1) {
         size_t to_write = remaining_bytes < 4096 ? remaining_bytes : 4096;
+        write(1, msg+bytes_sent, to_write);
         ssize_t bytes_wrote = write(clientfd, msg + bytes_sent, to_write);
         if (bytes_wrote == -1) {
             if (errno == EWOULDBLOCK || errno == EAGAIN) {
@@ -241,18 +243,21 @@ void accept_protocol_upgrade(int clientfd, struct conn_state* conn_state, char* 
 
 //as for now, we have only handful of files to send so instead of using sendfile() they are already stored in memory and request is dispatched in else-if spaghetti
 void parse_header(int clientfd, char* msg, struct conn_state* conn_state, int efd) {
-    printf("%s\n", msg);
+   // printf("%s\n", msg);
     char *first_line = strtok(msg, "\r\n");
     char *rest = msg + strlen(first_line) + 2;
     char *method = strtok(first_line, " ");
     char *resource = strtok(NULL, " ");
     if (strcmp(method, "GET") == 0) {
         if (strcmp(resource, "/") == 0) {
+            puts("giving html");
             write_to_socket(clientfd, html_response, strlen(html_response), conn_state, efd);
-        } else if (strcmp(resource, "/app.js") == 0) {
+        } else if (strcmp(resource, "/umi.js") == 0) {
             puts("send js file\"");
-        } else if (strcmp(resource, "/styles.css") == 0) {
+            write_to_socket(clientfd, js_response, strlen(js_response), conn_state, efd);
+        } else if (strcmp(resource, "/umi.css") == 0) {
             puts("send css file\"");
+            write_to_socket(clientfd, css_response, strlen(css_response), conn_state, efd);
         } else if (strcmp(resource, "/chat") == 0) {    //protocol upgrade
            char* line = strtok(rest, "\r\n");
            size_t len = strlen(line);
@@ -310,7 +315,7 @@ void read_http_request(int clientfd, struct conn_state* conn_state, int efd) {
             break;
         } else {
             finished = 0;       //we expected EAGAIN but new data arrived
-            printf("%s\n", conn_state->buf);
+          //  printf("%s\n", conn_state->buf);
             conn_state->bytes_read += bytes_read;
             if (conn_state->bytes_read > conn_state->buf_len) {
                 //header too big
@@ -364,6 +369,7 @@ void enframe(size_t msg_len, char* frame, size_t* frame_len) {
         *frame_len = 4;
     } else {
         //8 next bytes
+        //we aren't going to send messages that big
         ;
     }
 }
@@ -461,8 +467,8 @@ int main(int argc, char const *argv[]) {
 
     char* response_header = "HTTP/1.1 200 OK\r\nContent-Type: %s; charset=utf-8\r\nContent-Length: %d\r\n\r\n";
 
-    // as for now, we have only handful of files to send
-    //so instead of using sendfile() they are already stored in memory
+    // we have only handful of files to send
+    // so instead of using sendfile() they are stored in memory
 
     struct stat st;
     stat("../index.html", &st);
@@ -478,10 +484,45 @@ int main(int argc, char const *argv[]) {
 
     ssize_t err = read(file, html_response+strlen(html_response), (size_t)fsize);
     if (err == -1) {
-        perror("error on reading file to buf");
+        perror("error on reading html file to buf");
         exit(1);
     }
 
+    stat("../umi.css", &st);
+    fsize = st.st_size;
+    file = open("../umi.css", O_RDONLY);
+    if (file == -1) {
+        perror("umi css");
+        exit(1);
+    }
+
+    css_response = calloc(strlen(response_header) + fsize + 100, sizeof(char));
+    sprintf(css_response, response_header, "text/css", fsize);
+
+    err = read(file, css_response+strlen(css_response), (size_t)fsize);
+    if (err == -1) {
+        perror("error on reading css file to buf");
+        exit(1);
+    }
+
+    close(file);
+
+    stat("../umi.js", &st);
+    fsize = st.st_size;
+    file = open("../umi.js", O_RDONLY);
+    if (file == -1) {
+        perror("umi js");
+        exit(1);
+    }
+
+
+    js_response = calloc(strlen(response_header) + fsize + 100, sizeof(char));
+    sprintf(js_response, response_header, "text/javascript", fsize);
+    err = read(file, js_response+strlen(js_response), (size_t)fsize);
+    if (err == -1) {
+        perror("error on reading js file to buf");
+        exit(1);
+    }
 
     struct conn_state conn_states[MAX_CLIENTS];
     memset(conn_states, 0, sizeof(conn_states));
@@ -536,7 +577,7 @@ int main(int argc, char const *argv[]) {
 
     struct epoll_event events[MAX_EVENTS];
 
-    printf("Starting to listen on socket %d\n", sockfd);
+   // printf("Starting to listen on socket %d\n", sockfd);
     while(1) {
 
         int numready = epoll_wait(efd, events, MAX_EVENTS, -1);
