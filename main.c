@@ -52,6 +52,7 @@ struct write_queue {
 
 struct conn_state {         //used to store state of connection if we got partial read or write
     char protocol;          //0 - HTTP, 1 - WebSocket
+    int fd;
     size_t bytes_read;
     size_t buf_len;
     char* buf;
@@ -379,26 +380,29 @@ void enframe(size_t msg_len, char* frame, size_t* frame_len) {
 
 
 void dispatch_clients_request(char* msg, struct conn_state* conn_state, int efd) {
+    size_t frame_len;
+    char frame[10];
     char *first_line = strtok(msg, "\n");
     char *payload = msg + strlen(first_line) + 3;
     char* action = strtok(first_line, " ");
     char* target =  msg + strlen(action) + 1;
-    printf("Action: %s\n", action);
-    printf("Target: %s\n", target);
-    printf("Payload: %s\n", payload);
     int clientfd;
     int code = hashmap_get(connections, target, &clientfd);
-    printf("Code: %d\n", code);
-    printf("Client file desc: %d\n", clientfd);
-    printf("Map length: %d\n", hashmap_length(connections));
-
-   // size_t frame_len;
-   // char frame[10];
-   // enframe(2, frame, &frame_len);
-    //int clientfd = hashmap_get(connections, target, 0);
-   // printf("uwagaaaaaa: %d\n", clientfd);
-    //write_to_socket(clientfd, frame, frame_len, conn_state, efd);
-   // write_to_socket(clientfd, hi, strlen(hi), conn_state, efd);
+    if (code != 0) {
+        char* not_connected = "NOT_CONNECTED";
+        enframe(strlen(not_connected), frame, &frame_len);
+        write_to_socket(conn_state->fd, frame, frame_len, conn_state, efd);
+        write_to_socket(conn_state->fd, not_connected, strlen(not_connected), conn_state, efd);
+    } else {
+        char* template = "MESSAGE\n%s";
+        char* buf = calloc(64 + strlen(payload), sizeof(char));
+        sprintf(buf, template, payload, strlen(payload));
+        printf("SENT: %s\n", buf);
+        enframe(strlen(buf), frame, &frame_len);
+        write_to_socket(clientfd, frame, frame_len, conn_state, efd);
+        write_to_socket(clientfd, buf, strlen(buf), conn_state, efd);
+        free(buf);
+    }
 }
 
 
@@ -657,6 +661,7 @@ int main(int argc, char const *argv[]) {
             } else {
                 int clientfd = events[i].data.fd;
                 struct conn_state* conn_state = &conn_states[events[i].data.fd];
+                conn_state->fd = clientfd;
                 if (events[i].events & EPOLLOUT) {
                     resume_write(clientfd, conn_state, efd);
                 } else {
