@@ -3,7 +3,7 @@
 
 .avatar___MEMCK{margin:5px}.container___qL2Tv{transform:translateY(44%);background-color:#f0f8ff;display:flex;justify-content:space-between;border-bottom:1px solid grey}.exit-button___yxoR1{margin:2px;width:32px;background-color:rgba(1,1,1,0);border-color:rgba(1,1,1,0)}.icon___2gtBZ{transform:translateY(-1px)}.title-wrapper___1C59S{position:relative}.title___ATyw1{position:absolute;top:50%;transform:translate(-50%,-50%)}
 .container___2LDuq{display:flex;flex-direction:column;overflow:scroll}.paper___1DPKh{margin:5px;padding:10px;width:70%}.paper___1DPKh:last-child{margin-bottom:43px}.paper-user___1IVba{padding:10px}.paper-another___1hdH-{margin-left:auto}.dummy___13T6C{padding-top:10px}.paper___1DPKh:first-child{margin-top:30px}
-.text-field___16Bxc{position:absolute;top:12px;width:100%}.container___2_jB4{position:relative}.button___3-ueV{position:absolute;right:0;top:40px;border:none}
+.text-field___16Bxc{position:absolute;top:13px;width:100%}.container___2_jB4{position:relative}.button___3-ueV{position:absolute;right:0;top:44px;border:none}
 .chat-box___1Pzn6{display:grid;grid-template-rows:50px minmax(50px,1fr) 50px;min-width:250px;min-height:250px;height:100%;width:100%}
 .newChatButton___4MWUC{position:absolute;z-index:999;right:0;bottom:-100vh;margin:3em}.container___1tzX2{position:relative}
 #root,body,html{height:100%}body{margin:0}
