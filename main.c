@@ -19,17 +19,16 @@
 
 #include "hashmap.h"
 
-#define PORT 8080
 #define MAX_EVENTS 1000
 #define MAX_CLIENTS 1000
 #define HTTP_PROTOCOL 0
 #define WEBSOCKET_PROTOCOL 1
 
 map_t connections;
-const char *header_too_big = "HTTP/1.1 431 Request Header Fields Too Large\r\n\r\n";
-const char *content_not_found = "HTTP/1.1 404 Not Found\r\n\r\n";
-const char *method_not_supported = "HTTP/1.1 405 Method Not Allowed\r\n\r\n";
-const char *bad_request = "HTTP/1.1 400 Bad Request\r\n\r\n";
+char *header_too_big = "HTTP/1.1 431 Request Header Fields Too Large\r\n\r\n";
+char *content_not_found = "HTTP/1.1 404 Not Found\r\n\r\n";
+char *method_not_supported = "HTTP/1.1 405 Method Not Allowed\r\n\r\n";
+char *bad_request = "HTTP/1.1 400 Bad Request\r\n\r\n";
 char *html_response;
 char *css_response;
 char *js_response;
@@ -493,8 +492,10 @@ void read_ws_message(int clientfd, struct conn_state *conn_state, int efd) {
 
 int main(int argc, char const *argv[]) {
 
-    if (argc != 2)
+    if (argc != 3) {
+        puts("IP and PORT should be the only arguments\n ./chat_app_server <IP> <PORT>");
         exit(1);
+    }
 
     char *response_header = "HTTP/1.1 200 OK\r\nContent-Type: %s; charset=utf-8\r\nContent-Length: %d\r\n\r\n";
 
@@ -568,6 +569,7 @@ int main(int argc, char const *argv[]) {
         perror("setsockopt reuseaddr error");
     }
 
+    int PORT = (int) strtol(argv[2], (char **)NULL, 10);
     struct sockaddr_in sa;
     memset(&sa, 0, sizeof(struct sockaddr_in));
     sa.sin_family = AF_INET;
