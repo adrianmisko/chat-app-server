@@ -19,8 +19,6 @@
 
 #include "hashmap.h"
 
-//TODO - check cleaning up after writes, reads and disconnects
-
 #define PORT 8080
 #define MAX_EVENTS 1000
 #define MAX_CLIENTS 1000
@@ -28,24 +26,25 @@
 #define WEBSOCKET_PROTOCOL 1
 
 map_t connections;
-const char* header_too_big = "HTTP/1.1 431 Request Header Fields Too Large\r\n\r\n";
-const char* content_not_found = "HTTP/1.1 404 Not Found\r\n\r\n";
-const char* method_not_supported = "HTTP/1.1 405 Method Not Allowed\r\n\r\n";
-char* html_response;
-char* css_response;
-char* js_response;
+const char *header_too_big = "HTTP/1.1 431 Request Header Fields Too Large\r\n\r\n";
+const char *content_not_found = "HTTP/1.1 404 Not Found\r\n\r\n";
+const char *method_not_supported = "HTTP/1.1 405 Method Not Allowed\r\n\r\n";
+const char *bad_request = "HTTP/1.1 400 Bad Request\r\n\r\n";
+char *html_response;
+char *css_response;
+char *js_response;
 
 struct write_state {
-    struct write_state* next;
-    char* buf;
+    struct write_state *next;
+    char *buf;
     size_t msg_len;
     size_t bytes_wrote;
 };
 
 
 struct write_queue {
-    struct write_state* head;
-    struct write_state* tail;
+    struct write_state *head;
+    struct write_state *tail;
     size_t size;
 };
 
@@ -53,11 +52,12 @@ struct write_queue {
 struct conn_state {         //used to store state of connection if we got partial read or write
     char protocol;          //0 - HTTP, 1 - WebSocket
     int fd;
+    char ip[36];
     size_t bytes_read;
     size_t buf_len;
-    char* buf;
+    char *buf;
     size_t msg_len;
-    char* msg;
+    char *msg;
     char data_frame_received;
     char opcode;
     char fin;
@@ -67,7 +67,7 @@ struct conn_state {         //used to store state of connection if we got partia
 };
 
 
-void append(struct write_queue* write_queue, struct write_state* write_state) {
+void append(struct write_queue *write_queue, struct write_state *write_state) {
     if (write_queue->size == 0) {
         write_queue->head = write_state;
         write_queue->tail = write_state;
@@ -78,64 +78,65 @@ void append(struct write_queue* write_queue, struct write_state* write_state) {
     write_queue->size++;
 }
 
-void remove_front(struct write_queue* write_queue) {
+void remove_front(struct write_queue *write_queue) {
     if (write_queue->size == 0)
         return;
     if (write_queue->size == 1) {
-        free (write_queue->head);
+        free(write_queue->head);
         memset(write_queue, 0, sizeof(struct write_queue));
         return;
     } else {
-        struct write_state* temp = write_queue->head->next;
+        struct write_state *temp = write_queue->head->next;
         free(write_queue->head);
         write_queue->head = temp;
         write_queue->size--;
     }
 }
 
-void release_and_reset(struct conn_state* conn_state) {
+void release_and_reset(struct conn_state *conn_state) {
     if (conn_state->write_queue.size == 0) {
         memset(conn_state, 0, sizeof(struct conn_state));
         return;
     }
-    struct write_state* write_state = conn_state->write_queue.head;
+    struct write_state *write_state = conn_state->write_queue.head;
     while (write_state != NULL) {
         free(write_state->buf);
         write_state = write_state->next;
     }
+    hashmap_remove(connections, conn_state->ip);
+    close(conn_state->fd);
     memset(conn_state, 0, sizeof(struct conn_state));
 }
 
 
-void parse_data_frame(struct conn_state* conn_state) {
+void parse_data_frame(struct conn_state *conn_state) {
     if (conn_state->bytes_read < 6)
         return;
-    char* buf = conn_state->buf;
-    size_t msg_len = (unsigned int)(*(buf+1) & 127);
-    conn_state->fin = (buf[0] & 128) ? (char)1 : (char)0;
+    char *buf = conn_state->buf;
+    size_t msg_len = (unsigned int) (*(buf + 1) & 127);
+    conn_state->fin = (buf[0] & 128) ? (char) 1 : (char) 0;
     conn_state->opcode = buf[0] & 0b00001111;
     if (msg_len <= 125) {
         conn_state->skip = 6;
         conn_state->buf_len = msg_len + conn_state->skip;
-        memcpy(conn_state->mask, buf+2, sizeof(conn_state->mask));
+        memcpy(conn_state->mask, buf + 2, sizeof(conn_state->mask));
         conn_state->data_frame_received = 1;
     } else if (msg_len == 126 && conn_state->bytes_read >= 8) {
         uint16_t u16;
-        memcpy(&u16, buf+2, sizeof(uint16_t));
+        memcpy(&u16, buf + 2, sizeof(uint16_t));
         conn_state->skip = 8;
         conn_state->buf_len = ntohs(u16) + conn_state->skip;
-        memcpy(conn_state->mask, buf+4, sizeof(conn_state->mask));
+        memcpy(conn_state->mask, buf + 4, sizeof(conn_state->mask));
         conn_state->data_frame_received = 1;
     } else if (msg_len == 127 && conn_state->bytes_read >= 14) {
         uint64_t u64;
         memcpy(&u64, buf + 2, sizeof(uint64_t));
         conn_state->skip = 14;
         conn_state->buf_len = (size_t) be64toh(u64) + conn_state->skip;
-        memcpy(conn_state->mask, buf+10, sizeof(conn_state->mask));
+        memcpy(conn_state->mask, buf + 10, sizeof(conn_state->mask));
         conn_state->data_frame_received = 1;
     }
 }
-
 
 void resume_write(int clientfd, struct conn_state* conn_state, int efd) {
     //data is already packed into frames if we were writing to websocket
@@ -151,9 +152,8 @@ void resume_write(int clientfd, struct conn_state* conn_state, int efd) {
                 //epoll is still polling for write, no need to rearm the descriptor
                 break;
             } else if (errno == EPIPE) {
-                puts("client has terminated connection");
+                puts("Client has terminated connection");
                 release_and_reset(conn_state);
-                close(clientfd);
                 break;
             } else {
                 remaining_bytes -= bytes_wrote;
@@ -187,7 +187,6 @@ void write_to_socket(int clientfd, char* msg, size_t msg_len, struct conn_state*
     size_t bytes_sent = 0;
     while (1) {
         size_t to_write = remaining_bytes < 4096 ? remaining_bytes : 4096;
-        write(1, msg+bytes_sent, to_write);
         ssize_t bytes_wrote = write(clientfd, msg + bytes_sent, to_write);
         if (bytes_wrote == -1) {
             if (errno == EWOULDBLOCK || errno == EAGAIN) {
@@ -205,12 +204,11 @@ void write_to_socket(int clientfd, char* msg, size_t msg_len, struct conn_state*
                 write_state->bytes_wrote = 0;
                 append(&conn_state->write_queue, write_state);
             } else if (errno == EPIPE) {
-                puts("client has terminated connection");
+                puts("Client has terminated connection");
                 release_and_reset(conn_state);
-                close(clientfd);
                 break;
             } else {
-                perror("error on writing to client");
+                perror("Error on writing to client");
                 exit(1);
             }
         } else {
@@ -225,19 +223,19 @@ void write_to_socket(int clientfd, char* msg, size_t msg_len, struct conn_state*
     }
 }
 
-void accept_protocol_upgrade(int clientfd, struct conn_state* conn_state, char* key, int efd) {
-    printf("upgrading protocol for client %d\n", clientfd);
-    const char* magic_string = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
-    unsigned char* buf = malloc( (strlen(magic_string) + strlen(key)) * sizeof(char));
+void accept_protocol_upgrade(int clientfd, struct conn_state *conn_state, char *key, int efd) {
+    printf("Upgrading protocol for client %d\n", clientfd);
+    const char *magic_string = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+    unsigned char *buf = malloc((strlen(magic_string) + strlen(key)) * sizeof(char));
     memcpy(buf, key, strlen(key));
-    memcpy(buf+strlen(key), magic_string, strlen(magic_string));
+    memcpy(buf + strlen(key), magic_string, strlen(magic_string));
     unsigned char sha1_result[20];
     memset(sha1_result, 0, sizeof(sha1_result));
     SHA1(buf, strlen(buf), sha1_result);
     char encodedData[120];
     memset(encodedData, 0, sizeof(encodedData));
-    EVP_EncodeBlock((unsigned char *)encodedData, sha1_result, sizeof(sha1_result));
-    const char* response_template = "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: %s\r\n\r\n";
+    EVP_EncodeBlock((unsigned char *) encodedData, sha1_result, sizeof(sha1_result));
+    const char *response_template = "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: %s\r\n\r\n";
     char response[256];
     sprintf(response, response_template, encodedData);
     write_to_socket(clientfd, response, strlen(response), conn_state, efd);
@@ -245,43 +243,44 @@ void accept_protocol_upgrade(int clientfd, struct conn_state* conn_state, char* 
     free(buf);
 }
 
-// we have only handful of files to send so instead of using sendfile() they are already stored in memory and request is dispatched in else-if spaghetti
-void parse_header(int clientfd, char* msg, struct conn_state* conn_state, int efd) {
-   // printf("%s\n", msg);
+// we have only handful of files to send so instead of using sendfile()
+// they are already stored in memory and request is dispatched in else-if spaghetti
+void parse_header(int clientfd, char *msg, struct conn_state *conn_state, int efd) {
     char *first_line = strtok(msg, "\r\n");
     char *rest = msg + strlen(first_line) + 2;
     char *method = strtok(first_line, " ");
     char *resource = strtok(NULL, " ");
     if (strcmp(method, "GET") == 0) {
         if (strcmp(resource, "/") == 0) {
-            puts("giving html");
+            puts("Serving static html");
             write_to_socket(clientfd, html_response, strlen(html_response), conn_state, efd);
         } else if (strcmp(resource, "/umi.js") == 0) {
-            puts("send js file\"");
+            puts("Serving static javascript");
             write_to_socket(clientfd, js_response, strlen(js_response), conn_state, efd);
         } else if (strcmp(resource, "/umi.css") == 0) {
-            puts("send css file\"");
+            puts("Serving static css");
             write_to_socket(clientfd, css_response, strlen(css_response), conn_state, efd);
         } else if (strcmp(resource, "/chat") == 0) {    //protocol upgrade
-           char* line = strtok(rest, "\r\n");
-           size_t len = strlen(line);
-           line = strtok(line, ":");
-           line = line + len + 2;
-           while (line != NULL) {
-               line = strtok(line, "\r\n");
-               len = strlen(line);
-               line = strtok(line, ":");
-               if (strcmp(line, "Sec-WebSocket-Key") == 0)
-                   break;
-               else
-                   line = line + len + 2;
-           }
-           if (line == NULL) {
-               puts("bad request");
-               return;
-           }
+            char *line = strtok(rest, "\r\n");
+            size_t len = strlen(line);
+            line = strtok(line, ":");
+            line = line + len + 2;
+            while (line != NULL) {
+                line = strtok(line, "\r\n");
+                len = strlen(line);
+                line = strtok(line, ":");
+                if (strcmp(line, "Sec-WebSocket-Key") == 0)
+                    break;
+                else
+                    line = line + len + 2;
+            }
+            if (line == NULL) {
+                puts("Bad request");
+                write_to_socket(clientfd, bad_request, strlen(bad_request), conn_state, efd);
+                return;
+            }
             line[strlen(line)] = ':';
-            char* key = strtok(line, ": ") + strlen(line) + 2;
+            char *key = strtok(line, ": ") + strlen(line) + 2;
             accept_protocol_upgrade(clientfd, conn_state, key, efd);
         } else {
             write_to_socket(clientfd, content_not_found, strlen(content_not_found), conn_state, efd);
@@ -292,14 +291,15 @@ void parse_header(int clientfd, char* msg, struct conn_state* conn_state, int ef
 }
 
 
-void read_http_request(int clientfd, struct conn_state* conn_state, int efd) {
+void read_http_request(int clientfd, struct conn_state *conn_state, int efd) {
     char finished = 0;
     if (conn_state->bytes_read == 0) {                          //if read is not resumed allocate some space
         conn_state->buf = calloc(1024, sizeof(char));
         conn_state->buf_len = 1024;
     }
     while (1) {
-        ssize_t bytes_read = read(clientfd, conn_state->buf + conn_state->bytes_read, conn_state->buf_len - conn_state->bytes_read);
+        ssize_t bytes_read = read(clientfd, conn_state->buf + conn_state->bytes_read,
+                                  conn_state->buf_len - conn_state->bytes_read);
         if (bytes_read == -1) {
             if (errno == EWOULDBLOCK || errno == EAGAIN) {
                 if (finished) {
@@ -309,25 +309,23 @@ void read_http_request(int clientfd, struct conn_state* conn_state, int efd) {
                 }
                 break;
             } else {
-                perror("on reading http request");
+                perror("On reading http request");
                 exit(1);
             }
         } else if (bytes_read == 0) {
-            printf("client %d has disconnected\n", clientfd);
+            printf("Client %d has disconnected\n", clientfd);
             release_and_reset(conn_state);
-            close(clientfd);
             break;
         } else {
             finished = 0;       //we expected EAGAIN but new data arrived
-          //  printf("%s\n", conn_state->buf);
             conn_state->bytes_read += bytes_read;
             if (conn_state->bytes_read > conn_state->buf_len) {
                 //header too big
                 write_to_socket(clientfd, header_too_big, strlen(header_too_big), conn_state, efd);
                 finished = 1;
             }
-            char* delim = "\r\n\r\n";
-            char* p = strstr(conn_state->buf + conn_state->bytes_read - bytes_read, delim);
+            char *delim = "\r\n\r\n";
+            char *p = strstr(conn_state->buf + conn_state->bytes_read - bytes_read, delim);
             size_t bytes_after_header = 0;
             while (p != NULL) {
                 //found header
@@ -352,16 +350,16 @@ void read_http_request(int clientfd, struct conn_state* conn_state, int efd) {
 }
 
 
-char* decode_ws_message(struct conn_state* conn_state, size_t* decoded_msg_len) {
-    char* payload = conn_state->buf + conn_state->skip;
+char *decode_ws_message(struct conn_state *conn_state, size_t *decoded_msg_len) {
+    char *payload = conn_state->buf + conn_state->skip;
     *decoded_msg_len = conn_state->buf_len - conn_state->skip;
-    char* msg = calloc(*decoded_msg_len, sizeof(char));
+    char *msg = calloc(*decoded_msg_len, sizeof(char));
     for (int i = 0; i < *decoded_msg_len; ++i)
-        msg[i]= payload[i] ^ conn_state->mask[i % 4];
+        msg[i] = payload[i] ^ conn_state->mask[i % 4];
     return msg;
 }
 
-void enframe(size_t msg_len, char* frame, size_t* frame_len) {
+void enframe(size_t msg_len, char *frame, size_t *frame_len) {
     frame[0] = 0b10000001;
     if (msg_len <= 125) {
         frame[1] = msg_len & 127;
@@ -379,25 +377,28 @@ void enframe(size_t msg_len, char* frame, size_t* frame_len) {
 }
 
 
-void dispatch_clients_request(char* msg, struct conn_state* conn_state, int efd) {
+void dispatch_clients_request(char *msg, struct conn_state *conn_state, int efd) {
     size_t frame_len;
     char frame[10];
     char *first_line = strtok(msg, "\n");
     char *payload = msg + strlen(first_line) + 3;
-    char* action = strtok(first_line, " ");
-    char* target =  msg + strlen(action) + 1;
+    char *action = strtok(first_line, " ");
+    char *target = msg + strlen(action) + 1;
     int clientfd;
     int code = hashmap_get(connections, target, &clientfd);
     if (code != 0) {
-        char* not_connected = "NOT_CONNECTED";
-        enframe(strlen(not_connected), frame, &frame_len);
+        printf("%s not found, sending NOT_CONNECTED\n", conn_state->ip);
+        char *buf = calloc(128, sizeof(char));
+        snprintf(buf, 128 + strlen(payload), "NOT_CONNECTED %s\n", target);
+        enframe(strlen(buf), frame, &frame_len);
         write_to_socket(conn_state->fd, frame, frame_len, conn_state, efd);
-        write_to_socket(conn_state->fd, not_connected, strlen(not_connected), conn_state, efd);
+        write_to_socket(conn_state->fd, buf, strlen(buf), conn_state, efd);
+        free(buf);
     } else {
-        char* template = "MESSAGE\n%s";
-        char* buf = calloc(64 + strlen(payload), sizeof(char));
-        sprintf(buf, template, payload, strlen(payload));
-        printf("SENT: %s\n", buf);
+        printf("Message from %s to %s\n", conn_state->ip, target);
+        printf("%s\n", payload);
+        char *buf = calloc(128 + strlen(payload), sizeof(char));
+        snprintf(buf, 128 + strlen(payload), "MESSAGE_TO %s\n%s", conn_state->ip, payload);
         enframe(strlen(buf), frame, &frame_len);
         write_to_socket(clientfd, frame, frame_len, conn_state, efd);
         write_to_socket(clientfd, buf, strlen(buf), conn_state, efd);
@@ -406,14 +407,15 @@ void dispatch_clients_request(char* msg, struct conn_state* conn_state, int efd)
 }
 
 
-void read_ws_message(int clientfd, struct conn_state* conn_state, int efd) {
+void read_ws_message(int clientfd, struct conn_state *conn_state, int efd) {
     char finished = 0;
     if (conn_state->bytes_read == 0) {              //if read is not resumed allocate some space
         conn_state->buf = calloc(1024, sizeof(char));
         conn_state->buf_len = 1024;
     }
     while (1) {
-        ssize_t bytes_read = read(clientfd, conn_state->buf + conn_state->bytes_read, conn_state->buf_len - conn_state->bytes_read);
+        ssize_t bytes_read = read(clientfd, conn_state->buf + conn_state->bytes_read,
+                                  conn_state->buf_len - conn_state->bytes_read);
         if (bytes_read == -1) {
             if (errno == EWOULDBLOCK || errno == EAGAIN) {
                 if (finished) {
@@ -425,19 +427,18 @@ void read_ws_message(int clientfd, struct conn_state* conn_state, int efd) {
                 exit(1);
             }
         } else if (bytes_read == 0) {
-            printf("client %d has disconnected", clientfd);
+            printf("Client %d has disconnected", clientfd);
             release_and_reset(conn_state);
-            close(clientfd);
             break;
         } else {
             finished = 0;                                   //we expected EAGAIN but new data arrived
             conn_state->bytes_read += bytes_read;
-            if (! conn_state->data_frame_received) {        //that needs to be done only once
+            if (!conn_state->data_frame_received) {        //that needs to be done only once
                 size_t old_buf_len = conn_state->buf_len;
                 parse_data_frame(conn_state);
                 if (conn_state->buf_len > old_buf_len) {
                     //allocate more space
-                    char* new_buffer = calloc(conn_state->buf_len, sizeof(char));
+                    char *new_buffer = calloc(conn_state->buf_len, sizeof(char));
                     memcpy(new_buffer, conn_state->buf, conn_state->bytes_read);
                     free(conn_state->buf);
                     conn_state->buf = new_buffer;
@@ -446,38 +447,39 @@ void read_ws_message(int clientfd, struct conn_state* conn_state, int efd) {
             while (conn_state->bytes_read >= conn_state->buf_len) {
                 //we had more than one message or more in the buffer
                 size_t decoded_msg_len;
-                char* decoded_msg = decode_ws_message(conn_state, &decoded_msg_len);
+                char *decoded_msg = decode_ws_message(conn_state, &decoded_msg_len);
                 if (conn_state->fin) {
                     if (conn_state->opcode == 0x9) {
                         //it's a ping
                         ;
                     } else {
                         //process message
-                       dispatch_clients_request(decoded_msg, conn_state, efd);
+                        dispatch_clients_request(decoded_msg, conn_state, efd);
                     }
                     free(decoded_msg);
-                } else if (conn_state->opcode == 0x1 || conn_state->opcode == 0x2) {        //new message that will be continued, were saving it
+                } else if (conn_state->opcode == 0x1 ||
+                           conn_state->opcode == 0x2) {        //new message that will be continued, were saving it
                     conn_state->msg = decoded_msg;
                     conn_state->msg_len = decoded_msg_len;
                 } else if (conn_state->opcode == 0x0) {                                     //continuation of a message
-                    char* new_buffer = calloc(decoded_msg_len + conn_state->msg_len, sizeof(char));
+                    char *new_buffer = calloc(decoded_msg_len + conn_state->msg_len, sizeof(char));
                     memcpy(new_buffer, conn_state->msg, conn_state->msg_len);
                     memcpy(new_buffer + conn_state->msg_len, decoded_msg, decoded_msg_len);
                     conn_state->msg_len += decoded_msg_len;
                 }
                 memcpy(conn_state->buf, conn_state->buf + conn_state->buf_len,
-                        conn_state->bytes_read - conn_state->buf_len);
+                       conn_state->bytes_read - conn_state->buf_len);
                 memset(conn_state->buf + conn_state->bytes_read - conn_state->buf_len, 0, conn_state->buf_len);
                 conn_state->bytes_read -= conn_state->buf_len;
                 conn_state->data_frame_received = 0;
                 if (conn_state->bytes_read == 0) {
                     finished = 1;
-                } else if (conn_state->bytes_read > 0)  {   //if there was another message, or at least its frame we need to extract the information here
+                } else if (conn_state->bytes_read > 0) {   //if there was another message, or at least its frame we need to extract the information here
                     size_t old_buf_len = conn_state->buf_len;
                     parse_data_frame(conn_state);
                     if (conn_state->buf_len > old_buf_len) {
                         //allocate more space
-                        char* new_buffer = calloc(conn_state->buf_len, sizeof(char));
+                        char *new_buffer = calloc(conn_state->buf_len, sizeof(char));
                         memcpy(new_buffer, conn_state->buf, conn_state->bytes_read);
                         free(conn_state->buf);
                         conn_state->buf = new_buffer;
@@ -491,15 +493,18 @@ void read_ws_message(int clientfd, struct conn_state* conn_state, int efd) {
 
 int main(int argc, char const *argv[]) {
 
-    char* response_header = "HTTP/1.1 200 OK\r\nContent-Type: %s; charset=utf-8\r\nContent-Length: %d\r\n\r\n";
+    if (argc != 2)
+        exit(1);
+
+    char *response_header = "HTTP/1.1 200 OK\r\nContent-Type: %s; charset=utf-8\r\nContent-Length: %d\r\n\r\n";
 
     // we have only handful of files to send
     // so instead of using sendfile() they are stored in memory
 
     struct stat st;
-    stat("../index.html", &st);
+    stat("../static/index.html", &st);
     __off_t fsize = st.st_size;
-    int file = open("../index.html", O_RDONLY);
+    int file = open("../static/index.html", O_RDONLY);
     if (file == -1) {
         perror("index html");
         exit(1);
@@ -508,15 +513,15 @@ int main(int argc, char const *argv[]) {
     html_response = calloc(strlen(response_header) + fsize + 100, sizeof(char));
     sprintf(html_response, response_header, "text/html", fsize);
 
-    ssize_t err = read(file, html_response+strlen(html_response), (size_t)fsize);
+    ssize_t err = read(file, html_response + strlen(html_response), (size_t) fsize);
     if (err == -1) {
         perror("error on reading html file to buf");
         exit(1);
     }
 
-    stat("../umi.css", &st);
+    stat("../static/umi.css", &st);
     fsize = st.st_size;
-    file = open("../umi.css", O_RDONLY);
+    file = open("../static/umi.css", O_RDONLY);
     if (file == -1) {
         perror("umi css");
         exit(1);
@@ -525,7 +530,7 @@ int main(int argc, char const *argv[]) {
     css_response = calloc(strlen(response_header) + fsize + 100, sizeof(char));
     sprintf(css_response, response_header, "text/css", fsize);
 
-    err = read(file, css_response+strlen(css_response), (size_t)fsize);
+    err = read(file, css_response + strlen(css_response), (size_t) fsize);
     if (err == -1) {
         perror("error on reading css file to buf");
         exit(1);
@@ -533,9 +538,9 @@ int main(int argc, char const *argv[]) {
 
     close(file);
 
-    stat("../umi.js", &st);
+    stat("../static/umi.js", &st);
     fsize = st.st_size;
-    file = open("../umi.js", O_RDONLY);
+    file = open("../static/umi.js", O_RDONLY);
     if (file == -1) {
         perror("umi js");
         exit(1);
@@ -544,7 +549,7 @@ int main(int argc, char const *argv[]) {
 
     js_response = calloc(strlen(response_header) + fsize + 100, sizeof(char));
     sprintf(js_response, response_header, "text/javascript", fsize);
-    err = read(file, js_response+strlen(js_response), (size_t)fsize);
+    err = read(file, js_response + strlen(js_response), (size_t) fsize);
     if (err == -1) {
         perror("error on reading js file to buf");
         exit(1);
@@ -558,7 +563,7 @@ int main(int argc, char const *argv[]) {
     int sockfd = socket(AF_INET, SOCK_STREAM, 0);
 
     int reuse = 1;
-    int res = setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, (const char*)&reuse, sizeof(reuse));
+    int res = setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, (const char *) &reuse, sizeof(reuse));
     if (res == -1) {
         perror("setsockopt reuseaddr error");
     }
@@ -566,10 +571,10 @@ int main(int argc, char const *argv[]) {
     struct sockaddr_in sa;
     memset(&sa, 0, sizeof(struct sockaddr_in));
     sa.sin_family = AF_INET;
-    sa.sin_addr.s_addr = INADDR_ANY;
+    sa.sin_addr.s_addr = inet_addr(argv[1]);
     sa.sin_port = htons(PORT);
 
-    res = bind(sockfd, (const struct sockaddr*)&sa, sizeof(struct sockaddr_in));
+    res = bind(sockfd, (const struct sockaddr *) &sa, sizeof(struct sockaddr_in));
     if (res == -1) {
         perror("bind error");
         exit(1);
@@ -582,7 +587,7 @@ int main(int argc, char const *argv[]) {
     }
 
     res = listen(sockfd, 0);
-    if (res == -1 ) {
+    if (res == -1) {
         perror("listen error");
         exit(1);
     }
@@ -609,8 +614,8 @@ int main(int argc, char const *argv[]) {
     size_t client_info_size = sizeof(struct sockaddr_in);
     memset(&client_info, 0, client_info_size);
 
-    printf("Starting to listen on socket %d\n", sockfd);
-    while(1) {
+    printf("Starting to listen on: %s:%d, socket %d\n", argv[1], PORT, sockfd);
+    while (1) {
 
         int numready = epoll_wait(efd, events, MAX_EVENTS, -1);
         if (numready == -1) {
@@ -619,7 +624,7 @@ int main(int argc, char const *argv[]) {
         }
         for (int i = 0; i < numready; ++i) {
             if (events[i].data.fd == sockfd) {
-                int clientfd = accept(sockfd, (struct sockaddr*)&client_info, (socklen_t*)&client_info_size);
+                int clientfd = accept(sockfd, (struct sockaddr *) &client_info, (socklen_t *) &client_info_size);
                 if (clientfd == -1) {
                     if (errno == EWOULDBLOCK || errno == EAGAIN) {
                         //that can happen for some reason
@@ -646,13 +651,14 @@ int main(int argc, char const *argv[]) {
                     // get client's info and add to hashmap
                     char client_name[INET6_ADDRSTRLEN];
                     char port_name[6];
-                    if (getnameinfo((const struct sockaddr*)&client_info, sizeof client_info,
+                    if (getnameinfo((const struct sockaddr *) &client_info, sizeof client_info,
                                     client_name, sizeof(client_name), NULL, 0, NI_NUMERICHOST | NI_NUMERICSERV) == 0) {
-                        char* key = calloc(1, strlen(client_name));
+                        char *key = calloc(1, strlen(client_name));
                         memcpy(key, client_name, strlen(client_name));
-                        printf("%s\n", key);
-                        int code = hashmap_put(connections, key, clientfd);
-                        printf("Code: %d\n", code);
+                        printf("New client with IP %s\n", key);
+                        memcpy(conn_states[clientfd].ip, key, strlen(key));
+                        conn_states[clientfd].fd = clientfd;
+                        hashmap_put(connections, key, clientfd);
                     } else {
                         printf("Unable to get address\n");
                         close(clientfd);
@@ -660,17 +666,17 @@ int main(int argc, char const *argv[]) {
                 }
             } else {
                 int clientfd = events[i].data.fd;
-                struct conn_state* conn_state = &conn_states[events[i].data.fd];
-                conn_state->fd = clientfd;
+                struct conn_state *conn_state = &conn_states[events[i].data.fd];
                 if (events[i].events & EPOLLOUT) {
                     resume_write(clientfd, conn_state, efd);
                 } else {
                     if (conn_state->protocol == HTTP_PROTOCOL) {
-                        printf("http request from client %d\n", clientfd);
+                        printf("Http request from client %d, from %s\n", clientfd, conn_state->ip);
                         read_http_request(clientfd, conn_state, efd);
-                    }
-                    else
+                    } else {
+                        printf("WebSocket message from client %d, from %s\n", clientfd, conn_state->ip);
                         read_ws_message(clientfd, conn_state, efd);
+                    }
                 }
             }
 
