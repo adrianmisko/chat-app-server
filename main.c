@@ -378,7 +378,7 @@ void dispatch_clients_request(char *msg, struct conn_state *conn_state, int efd)
     printf("%s\n", extracted_payload);
     int code = hashmap_get(connections, target, &clientfd);
     if (code != 0) {
-        printf("%s not found, sending NOT_CONNECTED\n", conn_state->ip);
+        printf("%s not found, sending NOT_CONNECTED\n", target);
         char *buf = calloc(128, sizeof(char));
         snprintf(buf, 128 + strlen(payload), "NOT_CONNECTED %s\n", target);
         enframe(strlen(buf), frame, &frame_len);
