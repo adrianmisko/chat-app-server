@@ -237,8 +237,6 @@ void accept_protocol_upgrade(int clientfd, struct conn_state *conn_state, char *
     free(buf);
 }
 
-// we have only handful of files to send so instead of using sendfile()
-// they are already stored in memory and request is dispatched in else-if spaghetti
 void parse_header(int clientfd, char *msg, struct conn_state *conn_state, int efd) {
     char *first_line = strtok(msg, "\r\n");
     char *rest = msg + strlen(first_line) + 2;
