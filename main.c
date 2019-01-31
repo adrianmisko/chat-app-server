@@ -91,10 +91,7 @@ void remove_front(struct write_queue *write_queue) {
 }
 
 void release_and_reset(struct conn_state *conn_state) {
-    if (conn_state->write_queue.size == 0) {
-        memset(conn_state, 0, sizeof(struct conn_state));
-        return;
-    }
+    puts("Clearing");
     struct write_state *write_state = conn_state->write_queue.head;
     while (write_state != NULL) {
         free(write_state->buf);
@@ -375,6 +372,10 @@ void dispatch_clients_request(char *msg, struct conn_state *conn_state, int efd)
     char *action = strtok(first_line, " ");
     char *target = msg + strlen(action) + 1;
     int clientfd;
+    int len = conn_state->buf_len - conn_state->skip - 2 - strlen(action) - strlen(target);
+    char* extracted_payload = calloc(len, sizeof(char));
+    memcpy(extracted_payload, payload, len);
+    printf("%s\n", extracted_payload);
     int code = hashmap_get(connections, target, &clientfd);
     if (code != 0) {
         printf("%s not found, sending NOT_CONNECTED\n", conn_state->ip);
@@ -385,14 +386,15 @@ void dispatch_clients_request(char *msg, struct conn_state *conn_state, int efd)
         write_to_socket(conn_state->fd, buf, strlen(buf), conn_state, efd);
         free(buf);
     } else {
-        printf("Message from %s to %s\n", conn_state->ip, target);
-        printf("Payload: %s\n", payload);
+        printf("Message from %s to %s, socket %d\n", conn_state->ip, target, clientfd);
+        printf("Payload: %s\n", extracted_payload);
         char *buf = calloc(128 + strlen(payload), sizeof(char));
-        snprintf(buf, 128 + strlen(payload), "MESSAGE_TO %s\n%s", conn_state->ip, payload);
+        snprintf(buf, 128 + strlen(extracted_payload), "MESSAGE_TO %s\n%s", conn_state->ip, extracted_payload);
         enframe(strlen(buf), frame, &frame_len);
         write_to_socket(clientfd, frame, frame_len, conn_state, efd);
         write_to_socket(clientfd, buf, strlen(buf), conn_state, efd);
         free(buf);
+        free(extracted_payload);
     }
 }
 
@@ -438,6 +440,11 @@ void read_ws_message(int clientfd, struct conn_state *conn_state, int efd) {
                 //we had more than one message or more in the buffer
                 size_t decoded_msg_len;
                 char *decoded_msg = decode_ws_message(conn_state, &decoded_msg_len);
+                if (decoded_msg_len == 2) {
+                    puts("Closing handshake");
+                    release_and_reset(conn_state);
+                    return;
+                }
                 if (conn_state->fin) {
                     if (conn_state->opcode == 0x9) {
                         //it's a ping
