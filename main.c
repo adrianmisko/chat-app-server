@@ -29,9 +29,7 @@ char *header_too_big = "HTTP/1.1 431 Request Header Fields Too Large\r\n\r\n";
 char *content_not_found = "HTTP/1.1 404 Not Found\r\n\r\n";
 char *method_not_supported = "HTTP/1.1 405 Method Not Allowed\r\n\r\n";
 char *bad_request = "HTTP/1.1 400 Bad Request\r\n\r\n";
-char *html_response;
-char *css_response;
-char *js_response;
+
 
 struct write_state {
     struct write_state *next;
@@ -151,7 +149,7 @@ void resume_write(int clientfd, struct conn_state* conn_state, int efd) {
                 //epoll is still polling for write, no need to rearm the descriptor
                 break;
             } else if (errno == EPIPE) {
-                puts("Client has terminated connection");
+                printf("Client %d has terminated connection\n", clientfd);
                 release_and_reset(conn_state);
                 break;
             } else {
@@ -203,7 +201,7 @@ void write_to_socket(int clientfd, char* msg, size_t msg_len, struct conn_state*
                 write_state->bytes_wrote = 0;
                 append(&conn_state->write_queue, write_state);
             } else if (errno == EPIPE) {
-                puts("Client has terminated connection");
+                printf("Client %d has terminated connection\n", clientfd);
                 release_and_reset(conn_state);
                 break;
             } else {
@@ -250,16 +248,7 @@ void parse_header(int clientfd, char *msg, struct conn_state *conn_state, int ef
     char *method = strtok(first_line, " ");
     char *resource = strtok(NULL, " ");
     if (strcmp(method, "GET") == 0) {
-        if (strcmp(resource, "/") == 0) {
-            puts("Serving static html");
-            write_to_socket(clientfd, html_response, strlen(html_response), conn_state, efd);
-        } else if (strcmp(resource, "/umi.js") == 0) {
-            puts("Serving static javascript");
-            write_to_socket(clientfd, js_response, strlen(js_response), conn_state, efd);
-        } else if (strcmp(resource, "/umi.css") == 0) {
-            puts("Serving static css");
-            write_to_socket(clientfd, css_response, strlen(css_response), conn_state, efd);
-        } else if (strcmp(resource, "/chat") == 0) {    //protocol upgrade
+       if (strcmp(resource, "/chat") == 0) {    //protocol upgrade
             char *line = strtok(rest, "\r\n");
             size_t len = strlen(line);
             line = strtok(line, ":");
@@ -282,9 +271,11 @@ void parse_header(int clientfd, char *msg, struct conn_state *conn_state, int ef
             char *key = strtok(line, ": ") + strlen(line) + 2;
             accept_protocol_upgrade(clientfd, conn_state, key, efd);
         } else {
+            puts("Not found");
             write_to_socket(clientfd, content_not_found, strlen(content_not_found), conn_state, efd);
         }
     } else {
+        puts("Method not supported");
         write_to_socket(clientfd, method_not_supported, strlen(method_not_supported), conn_state, efd);
     }
 }
@@ -380,7 +371,7 @@ void dispatch_clients_request(char *msg, struct conn_state *conn_state, int efd)
     size_t frame_len;
     char frame[10];
     char *first_line = strtok(msg, "\n");
-    char *payload = msg + strlen(first_line) + 3;
+    char *payload = msg + strlen(first_line) + 1;
     char *action = strtok(first_line, " ");
     char *target = msg + strlen(action) + 1;
     int clientfd;
@@ -395,7 +386,7 @@ void dispatch_clients_request(char *msg, struct conn_state *conn_state, int efd)
         free(buf);
     } else {
         printf("Message from %s to %s\n", conn_state->ip, target);
-        printf("%s\n", payload);
+        printf("Payload: %s\n", payload);
         char *buf = calloc(128 + strlen(payload), sizeof(char));
         snprintf(buf, 128 + strlen(payload), "MESSAGE_TO %s\n%s", conn_state->ip, payload);
         enframe(strlen(buf), frame, &frame_len);
@@ -497,65 +488,6 @@ int main(int argc, char const *argv[]) {
         exit(1);
     }
 
-    char *response_header = "HTTP/1.1 200 OK\r\nContent-Type: %s; charset=utf-8\r\nContent-Length: %d\r\n\r\n";
-
-    // we have only handful of files to send
-    // so instead of using sendfile() they are stored in memory
-
-    struct stat st;
-    stat("../static/index.html", &st);
-    __off_t fsize = st.st_size;
-    int file = open("../static/index.html", O_RDONLY);
-    if (file == -1) {
-        perror("index html");
-        exit(1);
-    }
-
-    html_response = calloc(strlen(response_header) + fsize + 100, sizeof(char));
-    sprintf(html_response, response_header, "text/html", fsize);
-
-    ssize_t err = read(file, html_response + strlen(html_response), (size_t) fsize);
-    if (err == -1) {
-        perror("error on reading html file to buf");
-        exit(1);
-    }
-
-    stat("../static/umi.css", &st);
-    fsize = st.st_size;
-    file = open("../static/umi.css", O_RDONLY);
-    if (file == -1) {
-        perror("umi css");
-        exit(1);
-    }
-
-    css_response = calloc(strlen(response_header) + fsize + 100, sizeof(char));
-    sprintf(css_response, response_header, "text/css", fsize);
-
-    err = read(file, css_response + strlen(css_response), (size_t) fsize);
-    if (err == -1) {
-        perror("error on reading css file to buf");
-        exit(1);
-    }
-
-    close(file);
-
-    stat("../static/umi.js", &st);
-    fsize = st.st_size;
-    file = open("../static/umi.js", O_RDONLY);
-    if (file == -1) {
-        perror("umi js");
-        exit(1);
-    }
-
-
-    js_response = calloc(strlen(response_header) + fsize + 100, sizeof(char));
-    sprintf(js_response, response_header, "text/javascript", fsize);
-    err = read(file, js_response + strlen(js_response), (size_t) fsize);
-    if (err == -1) {
-        perror("error on reading js file to buf");
-        exit(1);
-    }
-
     struct conn_state conn_states[MAX_CLIENTS];
     memset(conn_states, 0, sizeof(conn_states));
 
@@ -569,7 +501,7 @@ int main(int argc, char const *argv[]) {
         perror("setsockopt reuseaddr error");
     }
 
-    int PORT = (int) strtol(argv[2], (char **)NULL, 10);
+    u_int16_t PORT = (u_int16_t) strtol(argv[2], (char **)NULL, 10);
     struct sockaddr_in sa;
     memset(&sa, 0, sizeof(struct sockaddr_in));
     sa.sin_family = AF_INET;
@@ -619,6 +551,7 @@ int main(int argc, char const *argv[]) {
     printf("Starting to listen on: %s:%d, socket %d\n", argv[1], PORT, sockfd);
     while (1) {
 
+        puts("Epoll wait");
         int numready = epoll_wait(efd, events, MAX_EVENTS, -1);
         if (numready == -1) {
             perror("epoll_wait");
@@ -663,7 +596,7 @@ int main(int argc, char const *argv[]) {
                         hashmap_put(connections, key, clientfd);
                     } else {
                         printf("Unable to get address\n");
-                        close(clientfd);
+                        release_and_reset(&conn_states[clientfd]);
                     }
                 }
             } else {
